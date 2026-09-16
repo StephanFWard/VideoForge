@@ -1,0 +1,15 @@
+# Never bake local artifacts into the image
+node_modules
+.venv
+venv
+output
+work
+vendor
+models
+.git
+.env
+*.log
+Dockerfile
+docker/comfyui.Dockerfile
+render.yaml
+docs

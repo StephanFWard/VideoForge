@@ -1,0 +1,81 @@
+# =============================================================================
+#  VideoForge on Render — Blueprint
+#
+#  Deploy with the "Deploy to Render" button in docs/deploy-render.md, or by
+#  committing this file and creating a Blueprint instance on render.com.
+#
+#  Architecture on Render:
+#    [ videoforge (web, Docker) ]  ──MCP──▶  [ ComfyUI (your choice below) ]
+#        │ Kokoro TTS runs inside this container (venv baked into the image)
+#        ▼
+#    [ persistent disk /data ]  — finished videos + work files
+#
+#  The diffusion backend (ComfyUI) is deliberately NOT fixed by this blueprint.
+#  Pick one:
+#    A. set COMFYUI_URL during deploy to a cloudflared tunnel that exposes the
+#       ComfyUI on your own PC  (free, uses your hardware, must stay online)
+#    B. uncomment the second service below to run ComfyUI on Render itself
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # The VideoForge web app (web UI + JSON API + the whole narration/ffmpeg tier)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: videoforge
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # 2 GB RAM: PyTorch/Kokoro inference does not fit in the 512 MB plans.
+    plan: standard
+    region: oregon
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: videoforge-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: VIDEO_FORGE_BACKEND
+        value: comfy
+      - key: RESOLUTION
+        value: 1080p            # 4k also works, but upscaling burns CPU time
+      - key: VIDEO_FORGE_OUT
+        value: /data/output     # on the persistent disk -> survives deploys
+      - key: VIDEO_FORGE_WORK
+        value: /data/work
+      - key: KOKORO_VOICE
+        value: af_heart
+      - key: VIDEO_FORGE_STEPS
+        value: 25
+      # Where is ComfyUI? Fill this in the Render dashboard at deploy time:
+      #   - a cloudflared tunnel URL for your local GPU/PC, or
+      #   - http://videoforge-comfyui:8188 if you enable the service below
+      - key: COMFYUI_URL
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL: run ComfyUI on Render too.  Uncomment to include it in the same
+  # blueprint, then set COMFYUI_URL=http://videoforge-comfyui:8188 (the private
+  # network name matches this service's `name`).
+  #
+  # CPU works but diffuses slowly (~minutes per frame); switch this service's
+  # instance type to a Render GPU plan in the dashboard for real speed. On GPU,
+  # also swap the torch install in docker/comfyui.Dockerfile to the CUDA wheels.
+  # ---------------------------------------------------------------------------
+  # - type: web
+  #   name: videoforge-comfyui
+  #   runtime: docker
+  #   dockerfilePath: ./docker/comfyui.Dockerfile
+  #   plan: standard              # change to a GPU plan for usable speed
+  #   region: oregon
+  #   healthCheckPath: /
+  #   autoDeploy: true
+  #   disk:
+  #     name: videoforge-comfyui-data
+  #     mountPath: /data
+  #     sizeGB: 10
+  #   envVars:
+  #     - key: PORT
+  #       value: 8188

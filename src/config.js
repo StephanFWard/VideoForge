@@ -137,7 +137,10 @@ export function loadConfig(overrides = {}) {
       ROOT,
       overrides.outputDir ?? env('VIDEO_FORGE_OUT', 'output'),
     ),
-    workDir: path.resolve(ROOT, overrides.workDir ?? 'work'),
+    workDir: path.resolve(
+      ROOT,
+      overrides.workDir ?? env('VIDEO_FORGE_WORK', 'work'),
+    ),
     kokoro: {
       voice: overrides.voice ?? env('KOKORO_VOICE', 'af_heart'),
       speed: Number(overrides.speed ?? env('KOKORO_SPEED', 1.0)),

@@ -112,6 +112,23 @@ You can also register both servers in a Cline-style MCP settings file and point
 `COMFYUI_MCP_COMMAND` / `KOKORO_MCP_COMMAND` at them — VideoForge is a normal
 MCP client and does not care who launched the server.
 
+## Deploying to Render
+
+VideoForge ships as a single Docker image (Node + Python/Kokoro + ffmpeg) and a
+Render Blueprint:
+
+```bash
+docker build -t videoforge . && docker run -p 10000:10000 videoforge
+```
+
+or deploy straight to Render — the repo root has a `render.yaml` blueprint:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy)
+
+Point `COMFYUI_URL` at your diffusion backend (a Render GPU service, a tunnelled
+local machine, or any cloud GPU). Full instructions, sizing guidance and
+gotchas: **[docs/deploy-render.md](docs/deploy-render.md)**.
+
 ## Testing
 
 ```bash
