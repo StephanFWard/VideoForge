@@ -23,12 +23,10 @@ diffusion backend. On Render:
 
    (or in the Render dashboard: **New → Blueprint**, pick the repo — Render
    reads `render.yaml` at the root automatically.)
-3. When prompted for **`COMFYUI_URL`**, enter one of:
-   - `http://videoforge-comfyui:8188` if you also uncommented the ComfyUI
-     service in `render.yaml`, or
-   - your cloudflared tunnel URL (Option B2 below), or
-   - leave it and set it later in **Environment** — the app boots either way
-     and `doctor`/`/api/health` will tell you what is missing.
+3. `COMFYUI_URL` is pre-set to `http://videoforge-comfyui:8188` (the bundled
+   ComfyUI service in the same blueprint, reached over Render's private
+   network). Leave it — or override it with a cloudflared tunnel URL (Option
+   B2 below) if you'd rather diffuse on your own hardware.
 4. Deploy. First build takes a while (PyTorch + model warm-up are baked into
    the image, so *deploys* are slow but *cold starts* stay fast).
 
@@ -52,18 +50,13 @@ diffusion backend. On Render:
 
 ## Connecting ComfyUI
 
-### 1. Run ComfyUI on Render itself (all-cloud)
+### 1. Run ComfyUI on Render itself (all-cloud, default)
 
-Uncomment the `videoforge-comfyui` service in `render.yaml` (image:
+The blueprint already includes the `videoforge-comfyui` service (image:
 `docker/comfyui.Dockerfile` — clones ComfyUI, installs torch, bakes the SD 1.5
-checkpoint, serves on `:8188`). Then set:
-
-```
-COMFYUI_URL=http://videoforge-comfyui:8188
-```
-
-That hostname works because Render puts all services in one region on a
-private network. For usable speed, switch that service's instance type to a
+checkpoint, serves on `:8188`). `COMFYUI_URL` is pre-set to
+`http://videoforge-comfyui:8188`, which works because Render puts all services
+in one region on a private network. Nothing to configure — just deploy.
 **GPU plan** in the dashboard and swap the CPU torch wheels in
 `docker/comfyui.Dockerfile` for CUDA ones (the line to change is marked in the
 file).

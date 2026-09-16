@@ -49,36 +49,32 @@ services:
         value: af_heart
       - key: VIDEO_FORGE_STEPS
         value: 25
-      # Where is ComfyUI? Fill this in the Render dashboard at deploy time:
-      #   - a cloudflared tunnel URL for your local GPU/PC, or
-      #   - http://videoforge-comfyui:8188 if you enable the service below
-      # NOTE: if you skip this, the app still boots and renders with mock
-      # visuals, but VIDEO_FORGE_BACKEND=comfy makes every render fail loudly.
-      # Default to `auto` so Option A works out of the box.
+      # Where is ComfyUI? With the bundled videoforge-comfyui service below,
+      # this is already correct — leave it, or override in the dashboard with
+      # a cloudflared tunnel URL for your local GPU/PC.
       - key: COMFYUI_URL
-        sync: false
+        value: http://videoforge-comfyui:8188
 
   # ---------------------------------------------------------------------------
-  # OPTIONAL: run ComfyUI on Render too.  Uncomment to include it in the same
-  # blueprint, then set COMFYUI_URL=http://videoforge-comfyui:8188 (the private
-  # network name matches this service's `name`).
+  # ComfyUI diffusion backend (same blueprint, Render private network).
+  # The web service reaches it at http://videoforge-comfyui:8188.
   #
   # CPU works but diffuses slowly (~minutes per frame); switch this service's
   # instance type to a Render GPU plan in the dashboard for real speed. On GPU,
   # also swap the torch install in docker/comfyui.Dockerfile to the CUDA wheels.
   # ---------------------------------------------------------------------------
-  # - type: web
-  #   name: videoforge-comfyui
-  #   runtime: docker
-  #   dockerfilePath: ./docker/comfyui.Dockerfile
-  #   plan: standard              # change to a GPU plan for usable speed
-  #   region: oregon
-  #   healthCheckPath: /
-  #   autoDeploy: true
-  #   disk:
-  #     name: videoforge-comfyui-data
-  #     mountPath: /data
-  #     sizeGB: 10
-  #   envVars:
-  #     - key: PORT
-  #       value: 8188
+  - type: web
+    name: videoforge-comfyui
+    runtime: docker
+    dockerfilePath: ./docker/comfyui.Dockerfile
+    plan: standard              # change to a GPU plan for usable speed
+    region: oregon
+    healthCheckPath: /
+    autoDeploy: true
+    disk:
+      name: videoforge-comfyui-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: PORT
+        value: 8188
