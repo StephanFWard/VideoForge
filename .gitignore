@@ -1,0 +1,40 @@
+# ---- Node ----
+node_modules/
+npm-debug.log*
+.npm/
+package-lock.json
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.pyc
+.python-version
+
+# ---- VideoForge output ----
+output/
+work/
+*.mp4
+*.wav
+*.mp3
+*.m4a
+
+# ---- Model weights (never commit) ----
+models/
+*.onnx
+*.safetensors
+*.ckpt
+
+# ---- Vendored ComfyUI checkout (cloned by scripts/setup-comfyui) ----
+vendor/
+
+# ---- Secrets ----
+.env
+.env.local
+*.key
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

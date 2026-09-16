@@ -1,0 +1,53 @@
+{
+  "name": "video-forge",
+  "version": "1.0.0",
+  "private": false,
+  "description": "Turn any topic into a finished video by orchestrating the ComfyUI MCP for visuals and a Kokoro MCP for narration.",
+  "keywords": [
+    "ai-video",
+    "comfyui",
+    "mcp",
+    "model-context-protocol",
+    "kokoro",
+    "text-to-speech",
+    "text-to-video",
+    "ffmpeg",
+    "4k"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/StephanFWard/VideoForge.git"
+  },
+  "homepage": "https://github.com/StephanFWard/VideoForge#readme",
+  "bugs": "https://github.com/StephanFWard/VideoForge/issues",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "video-forge": "src/cli.js"
+  },
+  "main": "src/pipeline/forge.js",
+  "files": [
+    "src",
+    "mcp-servers",
+    "scripts",
+    "public",
+    "test",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node src/cli.js serve",
+    "forge": "node src/cli.js forge",
+    "doctor": "node src/cli.js doctor",
+    "connect": "node src/cli.js connect",
+    "setup:kokoro": "node scripts/setup-kokoro.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.2.1"
+  }
+}

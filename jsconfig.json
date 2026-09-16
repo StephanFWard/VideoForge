@@ -1,0 +1,14 @@
+{
+  "//": "Editor tooling config for the plain-JS sources. checkJs stays off; the codebase is exercised by node:test and node --check instead.",
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.js", "public/**/*.js", "test/**/*.js"],
+  "exclude": ["node_modules", "vendor", ".venv", "output", "work", "mcp-servers"]
+}

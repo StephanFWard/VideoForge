@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VideoForge — AI video generator</title>
+<style>
+  :root {
+    --bg: #0d1017; --panel: #151a23; --panel2: #1b2230; --border: #263042;
+    --text: #e8edf6; --dim: #93a1b8; --accent: #5b8cff; --accent2: #8a63ff;
+    --ok: #3ecf8e; --warn: #f5b356; --err: #ff6b6b; font-size: 15px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: "Segoe UI", system-ui, sans-serif; }
+  header { padding: 28px 32px 20px; border-bottom: 1px solid var(--border); background: linear-gradient(120deg, #131826 0%, #0d1017 70%); }
+  h1 { margin: 0 0 4px; font-size: 1.5rem; letter-spacing: .3px; }
+  h1 span { background: linear-gradient(90deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  header p { margin: 0; color: var(--dim); font-size: .9rem; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 32px 64px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  label { display: block; font-size: .78rem; text-transform: uppercase; letter-spacing: .8px; color: var(--dim); margin: 12px 0 6px; }
+  label:first-child { margin-top: 0; }
+  textarea, select, input {
+    width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; font-size: .95rem; font-family: inherit;
+  }
+  textarea { min-height: 84px; resize: vertical; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 140px; }
+  button {
+    background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #fff; border: 0;
+    border-radius: 8px; padding: 12px 22px; font-size: 1rem; font-weight: 600; cursor: pointer; margin-top: 16px; width: 100%;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .pill { display: inline-block; font-size: .72rem; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim); margin-right: 8px; }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.bad { color: var(--err); border-color: var(--err); }
+  .pill.busy { color: var(--warn); border-color: var(--warn); }
+  #log {
+    background: #0a0d13; border: 1px solid var(--border); border-radius: 8px; font: 12px/1.7 Consolas, monospace;
+    padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap;
+  }
+  #log .ok { color: var(--ok); } #log .warn { color: var(--warn); } #log .error { color: var(--err); }
+  #log .step { color: #b48aff; } #log .info { color: var(--dim); }
+  .progress { height: 6px; background: var(--panel2); border-radius: 4px; margin: 0 0 14px; overflow: hidden; }
+  .progress > div { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .4s; }
+  video { width: 100%; border-radius: 10px; background: #000; }
+  .run { display: flex; gap: 14px; padding: 12px 0; border-top: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+  .run img { width: 128px; border-radius: 6px; background: #000; }
+  .run .meta { flex: 1; min-width: 200px; }
+  .run .meta strong { display: block; margin-bottom: 3px; }
+  .run .meta small { color: var(--dim); }
+  .run video { max-width: 300px; }
+  .run button.delete {
+    width: auto; margin: 0; padding: 8px 14px; font-size: .8rem; font-weight: 600;
+    background: transparent; color: var(--err); border: 1px solid var(--err); border-radius: 8px;
+    align-self: flex-start;
+  }
+  .run button.delete:hover { background: var(--err); color: #fff; }
+  .run button.delete:disabled { opacity: .5; cursor: wait; }
+  h2 { font-size: 1.05rem; margin: 0 0 12px; }
+  .hidden { display: none; }
+  .status { margin-top: 14px; color: var(--dim); font-size: .85rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Video<span>Forge</span></h1>
+  <p>Topic in, finished video out — ComfyUI MCP for visuals, Kokoro MCP for narration, ffmpeg for the final cut. All local.</p>
+</header>
+<main>
+  <section class="card">
+    <label for="topic">What should the video be about?</label>
+    <textarea id="topic" placeholder="e.g. Generate a realistic 4k video"></textarea>
+    <div class="row">
+      <div><label for="resolution">Delivery resolution</label>
+        <select id="resolution"><option value="4k" selected>4K (3840×2160)</option><option value="1080p">1080p</option><option value="720p">720p</option></select></div>
+      <div><label for="scenes">Scenes (0 = auto)</label>
+        <input id="scenes" type="number" min="0" max="12" value="0" /></div>
+      <div><label for="voice">Kokoro voice</label>
+        <select id="voice"><option value="af_heart" selected>af_heart</option><option value="af_bella">af_bella</option><option value="am_michael">am_michael</option><option value="am_adam">am_adam</option><option value="bf_emma">bf_emma</option><option value="bm_george">bm_george</option></select></div>
+      <div><label for="backend">Visual backend</label>
+        <select id="backend"><option value="auto" selected>auto</option><option value="comfy">comfy</option><option value="mock">mock</option></select></div>
+    </div>
+    <button id="generate">Generate video</button>
+    <div class="status" id="health"></div>
+  </section>
+
+  <section class="card hidden" id="runCard">
+    <h2>Render progress</h2>
+    <div class="progress"><div id="bar"></div></div>
+    <div id="log"></div>
+  </section>
+
+  <section class="card">
+    <h2>Generated videos</h2>
+    <div id="runs"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
