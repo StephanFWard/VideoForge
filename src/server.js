@@ -31,6 +31,26 @@ import { ComfyClient } from './mcp/comfy.js';
 
 const MAX_EVENTS_PER_RUN = 600;
 
+function isLocalhostUrl(url) {
+  try {
+    const host = new URL(String(url)).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
+
+async function fetchWithTimeout(url, ms) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
 /**
  * In-memory run registry. Live runs are tracked explicitly; finished runs are
  * discovered from manifest.json files in the output directory, so the gallery
@@ -121,6 +141,19 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
   const registry = new RunRegistry();
   const staticDir = path.join(ROOT, 'public');
   const config = loadConfig(configOverrides);
+  // Render reality: COMFYUI_URL is often unset (sync:false in render.yaml) or
+  // points at localhost inside a container where nothing listens. Probe the
+  // URL directly; if it refuses, fall through to the mock renderer instead of
+  // dying — but remember why, so /api/health can tell the user how to fix it.
+  if (config.backend === 'comfy' && isLocalhostUrl(config.comfyUrl)) {
+    try {
+      const probe = await fetchWithTimeout(`${config.comfyUrl.replace(/\/+$/, '')}/system_stats`, 8000);
+      if (!probe.ok) throw new Error(`HTTP ${probe.status}`);
+    } catch (error) {
+      config.comfyUnreachable = `ComfyUI unreachable at ${config.comfyUrl} (${error.message}).`;
+      config.backend = 'auto';
+    }
+  }
   const busy = { rendering: false };
 
   app.use(express.json({ limit: '256kb' }));
@@ -135,7 +168,15 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
       ffmpeg: false,
       busy: busy.rendering,
       resolution: config.resolution,
+      comfyUrl: config.comfyUrl,
     };
+
+    if (config.comfyUnreachable) {
+      health.hint =
+        `${config.comfyUnreachable} Running with mock visuals - renders still work. ` +
+        'For real diffusion on Render: set COMFYUI_URL to a tunnel or ' +
+        'http://videoforge-comfyui:8188 (see docs/deploy-render.md).';
+    }
 
     if (config.backend !== 'mock') {
       const client = new ComfyClient(config);

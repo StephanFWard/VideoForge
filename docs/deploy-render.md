@@ -43,7 +43,7 @@ diffusion backend. On Render:
 | Variable | Value | Purpose |
 | --- | --- | --- |
 | `COMFYUI_URL` | see "Connecting ComfyUI" | the diffusion backend |
-| `VIDEO_FORGE_BACKEND` | `comfy` | require ComfyUI (use `auto` to fall back to mock visuals) |
+| `VIDEO_FORGE_BACKEND` | `comfy` | require ComfyUI (use `auto`, the blueprint default, to fall back to mock visuals) |
 | `RESOLUTION` | `1080p` | delivery resolution (4k works, costs CPU time) |
 | `VIDEO_FORGE_OUT` | `/data/output` | finished videos on the disk |
 | `VIDEO_FORGE_WORK` | `/data/work` | scratch space on the disk |

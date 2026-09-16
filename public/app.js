@@ -7,11 +7,13 @@ async function refreshHealth() {
   try {
     const h = await (await fetch('/api/health')).json();
     const pill = (ok, label) => `<span class="pill ${ok ? 'ok' : 'bad'}">${label}</span>`;
-    $('health').innerHTML =
+    let html =
       pill(h.comfy?.ok, 'ComfyUI MCP') +
       pill(h.kokoro?.ok, 'Kokoro MCP') +
       pill(h.ffmpeg, 'ffmpeg') +
       (h.busy ? '<span class="pill busy">render in progress</span>' : '');
+    if (h.hint) html += `<div class="hint">${h.hint}</div>`;
+    $('health').innerHTML = html;
     return h;
   } catch {
     $('health').textContent = 'server unreachable';

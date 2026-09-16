@@ -38,7 +38,7 @@ services:
       - key: PORT
         value: 10000
       - key: VIDEO_FORGE_BACKEND
-        value: comfy
+        value: auto               # comfy = fail loudly w/o ComfyUI; auto = mock fallback
       - key: RESOLUTION
         value: 1080p            # 4k also works, but upscaling burns CPU time
       - key: VIDEO_FORGE_OUT
@@ -52,6 +52,9 @@ services:
       # Where is ComfyUI? Fill this in the Render dashboard at deploy time:
       #   - a cloudflared tunnel URL for your local GPU/PC, or
       #   - http://videoforge-comfyui:8188 if you enable the service below
+      # NOTE: if you skip this, the app still boots and renders with mock
+      # visuals, but VIDEO_FORGE_BACKEND=comfy makes every render fail loudly.
+      # Default to `auto` so Option A works out of the box.
       - key: COMFYUI_URL
         sync: false
 
