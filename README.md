@@ -1,5 +1,8 @@
 # VideoForge
 
+<img width="1631" height="658" alt="image" src="https://github.com/user-attachments/assets/20af843f-3211-481c-b0da-0beed485e3c5" />
+
+
 **Turn any topic into a finished narrated video — entirely on your own machine.**
 
 VideoForge is a local AI video generator. Give it a topic (or a hand-written
