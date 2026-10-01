@@ -6,9 +6,22 @@
  * author a video by writing one file, then hand it to VideoForge to render.
  * `normalizeStoryboard` is the gate: it validates, fills defaults and reports
  * warnings rather than failing on anything recoverable.
+ *
+ * Since v1.1 the storyboard also carries the animation vocabulary:
+ *   motion      auto | video | kenburns | kenburns-in | kenburns-out | pan-left | pan-right
+ *   transition  none | fade | crossfade   (how the scene enters)
  */
+import { MOTION_PRESETS, isMotionPreset } from './motion.js';
 
 export const STORYBOARD_VERSION = 1;
+
+/** How a scene may enter: hard cut, dip to black, or a real overlap. */
+export const TRANSITIONS = ['none', 'fade', 'crossfade'];
+
+/** Is this a transition name the renderer understands? */
+export function isTransition(name) {
+  return TRANSITIONS.includes(String(name ?? '').toLowerCase());
+}
 
 /** Guard rails: videos are meant to be short-form. */
 export const LIMITS = {
@@ -18,6 +31,7 @@ export const LIMITS = {
   defaultSceneSeconds: 5,
   maxNarrationChars: 1200,
 };
+
 
 /**
  * A tasteful, consistent look is applied to every image prompt unless the
@@ -94,8 +108,18 @@ export function normalizeStoryboard(raw, { config, defaults = {} } = {}) {
     }
 
     const motion = str(scene.motion, 'auto').toLowerCase();
-    if (!['auto', 'video', 'kenburns'].includes(motion)) {
+    const motionValid = motion === 'auto' || motion === 'video' || isMotionPreset(motion);
+    if (!motionValid) {
       warnings.push(`Scene ${index + 1}: unknown motion "${motion}"; using "auto".`);
+    }
+
+    const rawTransition = str(scene.transition ?? defaults.transition, 'none').toLowerCase();
+    const transitionValid = isTransition(rawTransition);
+    if (!transitionValid) {
+      warnings.push(
+        `Scene ${index + 1}: unknown transition "${rawTransition}"; using "none". ` +
+          `Known transitions: ${TRANSITIONS.join(', ')}.`,
+      );
     }
 
     const rawSeconds = scene.seconds ?? scene.duration;
@@ -108,10 +132,11 @@ export function normalizeStoryboard(raw, { config, defaults = {} } = {}) {
       imagePrompt: imagePrompt || narration,
       videoPrompt: videoPrompt || imagePrompt || narration,
       seconds,
-      motion: ['auto', 'video', 'kenburns'].includes(motion) ? motion : 'auto',
+      motion: motionValid ? motion : 'auto',
       seed: Number.isFinite(Number(scene.seed)) ? Number(scene.seed) : null,
-      transition: str(scene.transition, 'none'),
+      transition: transitionValid ? rawTransition : 'none',
     };
+
   });
 
   const storyboard = {

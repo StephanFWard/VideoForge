@@ -168,10 +168,12 @@ export function planFromTopic(topic, opts = {}) {
       title: beat.title,
       narration,
       image_prompt: image,
-      // Animate the keyframe with a gentle push when video models are absent.
+      // Animate the keyframe with a gentle push when video models are absent;
+      // `auto` cycles the eased presets deterministically by scene index.
       video_prompt: `${image}, subtle natural movement, cinematic`,
       seconds: opts.seconds ?? null,
       motion: 'auto',
+      transition: opts.transition ?? undefined,
     };
   });
 
@@ -186,8 +188,11 @@ export function planFromTopic(topic, opts = {}) {
     image_prompt: outroImage,
     video_prompt: `${outroImage}, slow gentle camera push in`,
     seconds: opts.seconds ?? null,
-    motion: 'kenburns',
+    // The outro pulls back instead of pushing in: a natural closing move.
+    motion: 'kenburns-out',
+    transition: opts.transition ?? undefined,
   });
+
 
   return {
     topic: cleanTopic,

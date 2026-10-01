@@ -15,7 +15,7 @@ import path from 'node:path';
 import { loadConfig, ROOT } from './config.js';
 import { createLogger } from './util/log.js';
 import { ffmpegAvailable } from './util/ffmpeg.js';
-import { forge } from './pipeline/forge.js';
+import { forge, forgeStill } from './pipeline/forge.js';
 import { loadStoryboard, planFromTopic } from './pipeline/planner.js';
 import { ComfyClient } from './mcp/comfy.js';
 import { KokoroNarration } from './mcp/kokoro.js';
@@ -26,6 +26,7 @@ VideoForge - turn a topic into a finished video with ComfyUI MCP + Kokoro MCP.
 USAGE
   video-forge forge [topic] [options]     Render a video
   video-forge plan  [topic] [options]     Print the storyboard, render nothing
+  video-forge still [topic] [options]     Render one keyframe (preview a scene)
   video-forge doctor                      Check dependencies and both MCP servers
   video-forge voices [--lang en-us]       List available Kokoro voices
   video-forge connect <comfyui-url>       Save a ComfyUI URL (local or tunnelled)
@@ -39,8 +40,12 @@ OPTIONS
       --backend <b>         auto | comfy | mock        (default: auto)
       --voice <name>        Kokoro voice                (default: af_heart)
       --speed <n>           Narration speed 0.5-2.0    (default: 1.0)
+      --transition <t>      none | fade | crossfade    (default: none)
       --steps <n>           Diffusion steps            (default: 25; lower = faster on CPU)
-      --out <dir>           Output directory           (default: ./output)
+      --fps <n>             Frames per second          (default: 30)
+      --no-cache            Ignore the keyframe cache and diffuse again
+      --scene <n>           Scene to render with \`still\` (default: 1)
+      --out <dir|file>      Output directory (forge) or PNG path (still)
       --plan-only           Plan and stop
       --json                Machine-readable output summary
   -h, --help                Show this help
@@ -48,6 +53,8 @@ OPTIONS
 EXAMPLES
   video-forge forge "how to brew better coffee" --scenes 5
   video-forge forge --storyboard my-video.storyboard.json --resolution 4k
+  video-forge forge "a 60 second pitch for my app" --transition crossfade
+  video-forge still "how to brew better coffee" --scene 2 --out preview.png
   video-forge doctor
   video-forge connect https://random-words-here.trycloudflare.com
 `;
@@ -56,7 +63,7 @@ EXAMPLES
 export function parseFlags(argv) {
   const flags = { _: [] };
   const aliases = { t: 'topic', s: 'storyboard', h: 'help', o: 'out' };
-  const booleans = new Set(['help', 'plan-only', 'json', 'silent']);
+  const booleans = new Set(['help', 'plan-only', 'json', 'silent', 'no-cache']);
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
@@ -92,6 +99,9 @@ export function configFromFlags(flags) {
   if (flags.voice) overrides.voice = flags.voice;
   if (flags.speed) overrides.speed = Number(flags.speed);
   if (flags.steps) overrides.steps = Number(flags.steps);
+  if (flags.fps) overrides.fps = Number(flags.fps);
+  if (flags.transition) overrides.transition = flags.transition;
+  if (flags['no-cache']) overrides.cache = false;
   if (flags.comfyUrl) overrides.comfyUrl = flags.comfyUrl;
   return overrides;
 }
@@ -138,6 +148,7 @@ async function cmdForge(flags) {
     storyboardFile,
     config: configFromFlags(flags),
     scenes: flags.scenes ? Number(flags.scenes) : undefined,
+    transition: flags.transition && flags.transition !== true ? String(flags.transition) : undefined,
     planOnly: Boolean(flags['plan-only']),
     silent: Boolean(flags.json),
   });
@@ -166,6 +177,36 @@ async function cmdPlan(flags) {
   console.error(`# ${mode} storyboard from ${source}`);
   for (const warning of warnings) console.error(`# warning: ${warning}`);
   console.log(JSON.stringify(storyboard, null, 2));
+}
+
+/**
+ * `video-forge still` - render one scene's keyframe without a full render,
+ * the equivalent of `remotion still`. Useful for checking prompts cheaply.
+ */
+async function cmdStill(flags) {
+  const topic = topicFrom(flags);
+  const storyboardFile = flags.storyboard && flags.storyboard !== true ? flags.storyboard : null;
+  if (!topic && !storyboardFile) {
+    console.error('Provide a topic or --storyboard <file>.\n');
+    console.log(USAGE);
+    process.exitCode = 2;
+    return;
+  }
+  if (storyboardFile && !fs.existsSync(storyboardFile)) {
+    throw new Error(`Storyboard file not found: ${storyboardFile}`);
+  }
+
+  const result = await forgeStill({
+    topic,
+    storyboardFile,
+    scene: flags.scene && flags.scene !== true ? Number(flags.scene) : 1,
+    outPath: flags.out && flags.out !== true ? String(flags.out) : undefined,
+    config: configFromFlags(flags),
+    silent: Boolean(flags.json),
+  });
+
+  if (flags.json) console.log(JSON.stringify(result, null, 2));
+  else console.log(`\nPreview: ${result.path} (scene ${result.scene}/${result.total}, ${result.method})`);
 }
 
 async function cmdVoices(flags) {
@@ -311,6 +352,9 @@ export async function main(argv = process.argv.slice(2)) {
       break;
     case 'plan':
       await cmdPlan(flags);
+      break;
+    case 'still':
+      await cmdStill(flags);
       break;
     case 'doctor':
       await cmdDoctor();

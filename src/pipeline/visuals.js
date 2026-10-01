@@ -17,19 +17,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ComfyClient } from '../mcp/comfy.js';
 import { placeholderShot, probe, stillToVideo } from '../util/ffmpeg.js';
+import { cacheKey, readCacheEntry, writeCacheEntry } from '../util/cache.js';
+import { randomSeed, resolveMotion, wantsDiffusionMotion, zoompanFilter } from './motion.js';
 
 export const BACKENDS = ['auto', 'comfy', 'mock'];
 
 export class VisualRenderer {
   /**
    * @param {object} config VideoForge config.
-   * @param {object} [options] { logger, onProgress, look, negative, steps, cfg }
+   * @param {object} [options] { logger, onProgress, look, negative, steps, cfg, seedBase }
    *   `look` is appended to every scene prompt so a multi-scene video keeps one
    *   consistent visual style instead of looking like a patchwork.
+   *   `seedBase` (usually the topic) gives every scene a deterministic
+   *   diffusion seed, so reruns and cache lookups agree.
    */
   constructor(
     config,
-    { logger = null, onProgress = null, look = '', negative = '', steps = 25, cfg = 7 } = {},
+    { logger = null, onProgress = null, look = '', negative = '', steps = 25, cfg = 7, seedBase = '' } = {},
   ) {
     this.config = config;
     this.logger = logger;
@@ -38,9 +42,20 @@ export class VisualRenderer {
     this.negative = negative;
     this.steps = steps;
     this.cfg = cfg;
+    this.seedBase = seedBase;
     this.backend = null;
     this.comfy = null;
     this.reason = null;
+    this.cache = { hits: 0, misses: 0 };
+  }
+
+  /**
+   * The seed a scene will render with: the storyboard's own seed when given,
+   * otherwise a value derived deterministically from the topic and scene index.
+   */
+  seedFor(scene, index) {
+    if (scene && scene.seed !== null && scene.seed !== undefined) return scene.seed;
+    return randomSeed(`${this.seedBase}#${index}`);
   }
 
   /**
@@ -87,11 +102,38 @@ export class VisualRenderer {
     return this;
   }
 
-  /** Render one keyframe image. Returns a local file path, or null on failure. */
+  /**
+   * Render one keyframe image.
+   *
+   * Returns `{path, cached, seed}`, or null when the backend is not ComfyUI.
+   * Identical inputs (prompt, sampler settings, seed) always produce the same
+   * picture, so they also form the cache key; a hit skips diffusion entirely.
+   */
   async renderStill({ scene, index, outDir, width, height }) {
     if (this.backend !== 'comfy') return null;
 
     const prompt = this.look ? `${scene.imagePrompt}. ${this.look}` : scene.imagePrompt;
+    const seed = this.seedFor(scene, index);
+    const key = cacheKey([
+      'vf-still-v1',
+      prompt,
+      this.negative,
+      width,
+      height,
+      this.steps,
+      this.cfg,
+      seed,
+    ]);
+
+    if (this.config.cache) {
+      const hit = readCacheEntry({ cacheDir: this.config.cacheDir, key });
+      if (hit) {
+        this.cache.hits += 1;
+        this.logger?.debug?.(`scene ${index}: keyframe served from cache`);
+        return { path: hit, cached: true, seed };
+      }
+    }
+
     this.logger?.debug?.(`scene ${index}: requesting keyframe`);
 
     const { promptId } = await this.comfy.renderImage({
@@ -101,7 +143,7 @@ export class VisualRenderer {
       height,
       steps: this.steps,
       cfg: this.cfg,
-      seed: scene.seed ?? undefined,
+      seed,
       filenamePrefix: `video-forge/scene${String(index).padStart(2, '0')}`,
     });
 
@@ -115,7 +157,12 @@ export class VisualRenderer {
 
     const image = downloaded.find((f) => f.kind === 'image') ?? downloaded[0];
     if (!image) throw new Error(`ComfyUI produced no image for scene ${index}.`);
-    return image.local;
+
+    this.cache.misses += 1;
+    if (this.config.cache) {
+      writeCacheEntry({ source: image.local, cacheDir: this.config.cacheDir, key });
+    }
+    return { path: image.local, cached: false, seed };
   }
 
   /**
@@ -124,7 +171,7 @@ export class VisualRenderer {
    */
   async renderMotion({ scene, index, still, outDir }) {
     if (this.backend !== 'comfy' || !still) return null;
-    if (scene.motion === 'kenburns') return null;
+    if (!wantsDiffusionMotion(scene.motion)) return null;
 
     const { width, height } = this.config.render;
 
@@ -170,10 +217,12 @@ export class VisualRenderer {
    *   2. diffusion keyframe -> Ken Burns push            (no video model needed)
    *   3. ffmpeg placeholder                              (no ComfyUI at all)
    *
-   * Returns an un-normalised motion clip plus the keyframe that produced it;
-   * audio, timing and resolution normalisation happen in the assembler.
+   * Returns an un-normalised motion clip plus the keyframe that produced it,
+   * the resolved motion preset, the deterministic seed and whether the
+   * keyframe came from the cache; audio, timing and resolution normalisation
+   * happen in the assembler.
    *
-   * @returns {Promise<{still: string|null, clip: string, method: string, backend: string}>}
+   * @returns {Promise<{still: string|null, clip: string, method: string, backend: string, motion: string, seed: number|null, cached: boolean}>}
    */
   async renderScene({ scene, index, outDir, width, height, fps }) {
     const { width: renderWidth, height: renderHeight } = this.config.render;
@@ -182,20 +231,24 @@ export class VisualRenderer {
     const rawClip = path.join(outDir, `scene${tag}_raw.mp4`);
 
     let still = null;
+    let cached = false;
+    let seed = null;
 
-    // 1. Keyframe (diffusion) -------------------------------------------------
+    // 1. Keyframe (diffusion, cache-aware) ------------------------------------
     if (this.backend === 'comfy') {
       try {
-        const remoteStill = await this.renderStill({
+        const rendered = await this.renderStill({
           scene,
           index,
           outDir,
           width: renderWidth,
           height: renderHeight,
         });
-        if (remoteStill && fs.existsSync(remoteStill)) {
-          fs.copyFileSync(remoteStill, targetStill);
+        if (rendered?.path && fs.existsSync(rendered.path)) {
+          fs.copyFileSync(rendered.path, targetStill);
           still = targetStill;
+          cached = rendered.cached;
+          seed = rendered.seed;
         }
       } catch (error) {
         this.logger?.warn?.(
@@ -210,21 +263,43 @@ export class VisualRenderer {
       const motion = await this.renderMotion({ scene, index, still, outDir });
       if (motion) {
         fs.copyFileSync(motion, rawClip);
-        return { still, clip: rawClip, method: 'diffusion-video', backend: this.backend };
+        return {
+          still,
+          clip: rawClip,
+          method: 'diffusion-video',
+          backend: this.backend,
+          motion: 'video',
+          seed,
+          cached,
+        };
       }
 
       // Ken Burns is always available once we have a picture, and it reads as
-      // intentional camera movement rather than a broken render.
+      // intentional camera movement rather than a broken render. The preset is
+      // resolved deterministically (`auto` cycles by scene index) and compiled
+      // into an exact, frame-counted filter chain.
+      const preset = resolveMotion(scene.motion, index);
+      const clipSeconds = scene.seconds ?? 4;
+      const frames = Math.max(2, Math.round(clipSeconds * fps));
       await stillToVideo({
         image: still,
         output: rawClip,
         width: renderWidth,
         height: renderHeight,
         fps,
-        seconds: scene.seconds ?? 4,
+        seconds: clipSeconds,
+        filter: zoompanFilter({ motion: preset, width: renderWidth, height: renderHeight, frames, fps }),
         ffmpeg: this.config.ffmpeg,
       });
-      return { still, clip: rawClip, method: 'ken-burns', backend: this.backend };
+      return {
+        still,
+        clip: rawClip,
+        method: 'ken-burns',
+        backend: this.backend,
+        motion: preset,
+        seed,
+        cached,
+      };
     }
 
     // 3. Placeholder ----------------------------------------------------------
@@ -238,7 +313,15 @@ export class VisualRenderer {
       label: scene.title || scene.narration.slice(0, 60),
       ffmpeg: this.config.ffmpeg,
     });
-    return { still: null, clip: rawClip, method: 'placeholder', backend: this.backend };
+    return {
+      still: null,
+      clip: rawClip,
+      method: 'placeholder',
+      backend: this.backend,
+      motion: 'placeholder',
+      seed: null,
+      cached: false,
+    };
   }
 
   async close() {
