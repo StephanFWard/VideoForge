@@ -11,6 +11,19 @@ import { fileURLToPath } from 'node:url';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * VideoForge's own version, read from package.json once so the manifest and
+ * `doctor` can never report a stale hard-coded number (Remotion exposes the
+ * same idea as its `VERSION` export).
+ */
+export const VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+
 /** Minimal .env parser (no dependency, no surprises). */
 function readDotEnv(file) {
   const out = {};
@@ -110,7 +123,45 @@ export function loadConfig(overrides = {}) {
   ).toLowerCase();
   const resolution = RESOLUTIONS[resolutionKey] ? resolutionKey : '4k';
 
+  // fps is the frame rate every timing calculation is based on; an invalid
+  // value would silently break frame-exact cutting, so it is validated here.
+  const fpsRaw = Number(overrides.fps ?? env('VIDEO_FORGE_FPS', 30));
+  const fps = Number.isFinite(fpsRaw) && fpsRaw > 0 && fpsRaw <= 120
+    ? Math.round(fpsRaw * 1000) / 1000
+    : 30;
+
+  const padSeconds = Math.max(0, Number(overrides.padSeconds ?? env('VIDEO_FORGE_PAD_SECONDS', 0.6)) || 0);
+  const transitionRaw = Number(
+    overrides.transitionSeconds ?? env('VIDEO_FORGE_TRANSITION_SECONDS', 0.5),
+  );
+  const transitionSeconds = Number.isFinite(transitionRaw)
+    ? Math.min(Math.max(transitionRaw, 0), 5)
+    : 0.5;
+
+  const workDir = path.resolve(ROOT, overrides.workDir ?? env('VIDEO_FORGE_WORK', 'work'));
+  const cache = overrides.cache ?? String(env('VIDEO_FORGE_CACHE', '1')) !== '0';
+  const cacheDir = path.resolve(
+    workDir,
+    overrides.cacheDir ?? env('VIDEO_FORGE_CACHE_DIR', 'cache'),
+  );
+
+  const captionsMode = String(
+    overrides.captions ?? overrides.captionsMode ?? env('VIDEO_FORGE_CAPTIONS', 'sidecar'),
+  ).toLowerCase();
+  const captionsEnabled = !['0', 'off', 'false', 'none', 'no'].includes(captionsMode);
+  const captions = {
+    enabled: captionsEnabled,
+    // sidecar = always write <name>.srt next to the delivery file (default).
+    // burn    = also render the lines into the picture with ffmpeg subtitles.
+    mode: captionsMode === 'burn' ? 'burn' : 'sidecar',
+    maxChars: Math.max(
+      24,
+      Math.min(160, Number(overrides.captionsMaxChars ?? env('VIDEO_FORGE_CAPTIONS_MAX_CHARS', 72)) || 72),
+    ),
+  };
+
   return {
+    version: VERSION,
     root: ROOT,
     comfyUrl,
     comfyMcp,
@@ -122,25 +173,29 @@ export function loadConfig(overrides = {}) {
     //  intermediate - what scenes are cut together at (editing resolution)
     //  delivery     - the finished file's resolution (what you asked for)
     render: RENDER_RESOLUTIONS[resolution],
-    intermediate: resolution === '720p' ? RESOLUTIONS['720p'] : RESOLUTIONS['1080p'],
+    intermediate: RESOLUTIONS[resolution === '720p' ? '720p' : '1080p'],
     delivery: RESOLUTIONS[resolution],
-    padSeconds: Number(overrides.padSeconds ?? env('VIDEO_FORGE_PAD_SECONDS', 0.6)),
+    padSeconds,
+    captions,
+    // The default scene entry transition (none | fade | crossfade). A
+    // storyboard may still override it per scene.
+    transition: String(overrides.transition ?? env('VIDEO_FORGE_TRANSITION', 'none')).toLowerCase(),
+    // Crossfade length. Crossfades overlap scenes, so this many seconds are
+    // removed from the final timeline per crossfaded boundary.
+    transitionSeconds,
     // Diffusion sampling controls. Lower steps are dramatically faster on CPU.
     steps: Number(overrides.steps ?? env('VIDEO_FORGE_STEPS', 25)),
     cfg: Number(overrides.cfg ?? env('VIDEO_FORGE_CFG', 7)),
-    // Scenes are normalised at this size, then the finished cut is upscaled once
-    // to the delivery resolution. Holding the intermediate at 1080p avoids
-    // upscaling twice.
-    intermediate: RESOLUTIONS[resolution === '720p' ? '720p' : '1080p'],
-    fps: Number(overrides.fps ?? env('VIDEO_FORGE_FPS', 30)),
+    fps,
+    // Keyframes are content-addressed and reused across runs; `--no-cache`
+    // (VIDEO_FORGE_CACHE=0) turns that off for a forced fresh diffusion pass.
+    cache,
+    cacheDir,
     outputDir: path.resolve(
       ROOT,
       overrides.outputDir ?? env('VIDEO_FORGE_OUT', 'output'),
     ),
-    workDir: path.resolve(
-      ROOT,
-      overrides.workDir ?? env('VIDEO_FORGE_WORK', 'work'),
-    ),
+    workDir,
     kokoro: {
       voice: overrides.voice ?? env('KOKORO_VOICE', 'af_heart'),
       speed: Number(overrides.speed ?? env('KOKORO_SPEED', 1.0)),

@@ -23,9 +23,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import express from 'express';
-import { loadConfig, ROOT } from './config.js';
+import { loadConfig, ROOT, VERSION } from './config.js';
 import { createLogger } from './util/log.js';
 import { forge } from './pipeline/forge.js';
+import { TRANSITIONS } from './pipeline/storyboard.js';
 import { ffmpegAvailable } from './util/ffmpeg.js';
 import { ComfyClient } from './mcp/comfy.js';
 
@@ -163,6 +164,7 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
   app.get('/api/health', async (req, res) => {
     const health = {
       ok: true,
+      version: VERSION,
       comfy: { ok: false, detail: null },
       kokoro: { ok: false, detail: null },
       ffmpeg: false,
@@ -225,6 +227,15 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
         .json({ ok: false, error: 'Provide a "topic" (or "storyboardFile").' });
     }
 
+    const transition =
+      typeof body.transition === 'string' ? body.transition.trim().toLowerCase() : '';
+    if (transition && !TRANSITIONS.includes(transition)) {
+      return res.status(400).json({
+        ok: false,
+        error: `Unknown transition "${body.transition}". Use ${TRANSITIONS.join(' | ')}.`,
+      });
+    }
+
     const runConfig = loadConfig({
       ...configOverrides,
       resolution: body.resolution ?? undefined,
@@ -232,6 +243,7 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
       speed: body.speed !== undefined ? Number(body.speed) : undefined,
       steps: body.steps !== undefined ? Number(body.steps) : undefined,
       backend: body.backend ?? undefined,
+      fps: body.fps !== undefined ? Number(body.fps) : undefined,
     });
 
     const run = registry.create(runConfig);
@@ -253,12 +265,17 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
       topic: topic || undefined,
       storyboardFile: storyboardFile || undefined,
       scenes: body.scenes !== undefined ? Number(body.scenes) : undefined,
+      transition: transition || undefined,
       config: {
         resolution: runConfig.resolution,
         voice: runConfig.kokoro.voice,
         speed: runConfig.kokoro.speed,
         steps: runConfig.steps,
         backend: runConfig.backend,
+        fps: runConfig.fps,
+        transition: runConfig.transition,
+        transitionSeconds: runConfig.transitionSeconds,
+        cache: runConfig.cache,
         outputDir: runConfig.outputDir,
         workDir: runConfig.workDir,
       },

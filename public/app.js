@@ -45,6 +45,8 @@ async function refreshRuns() {
       <div class="meta">
         <strong>${run.title ?? run.topic ?? run.id}</strong>
         <small>${m.delivery ?? ''}${m.output?.durationSeconds ? ' · ' + m.output.durationSeconds.toFixed(1) + 's' : ''}
+        ${m.timeline ? ' · ' + m.timeline.durationInFrames + ' frames @ ' + m.timeline.fps + 'fps' : ''}
+        ${m.backend?.cache?.hits ? ' · ' + m.backend.cache.hits + ' keyframe(s) cached' : ''}
         · ${m.backend?.visuals ?? '?'} visuals · ${m.backend?.voice ?? '?'} narration · ${run.status}</small>
       </div>
       ${video ? `<video src="${video}" controls preload="metadata"></video>` : ''}`;
@@ -102,6 +104,7 @@ async function generate() {
     resolution: $('resolution').value,
     voice: $('voice').value,
     backend: $('backend').value,
+    transition: $('transition').value,
   };
   const scenes = Number($('scenes').value) || 0;
   if (scenes > 0) body.scenes = scenes;
@@ -133,7 +136,13 @@ async function generate() {
         return;
       }
       if (e.type === 'log') appendLog(e.level, e.message);
-      else if (e.type === 'scene-done') {
+      else if (e.type === 'timeline') {
+        appendLog(
+          'info',
+          `timeline locked: ${e.timeline.durationInFrames} frames @ ${e.timeline.fps}fps ` +
+            `(${e.timeline.durationSeconds.toFixed(1)}s, ${e.timeline.mode})`,
+        );
+      } else if (e.type === 'scene-done') {
         sceneDone = e.scene; sceneTotal = e.total;
         appendLog('ok', `scene ${e.scene}/${e.total} complete`);
       } else if (e.type === 'segment') {
