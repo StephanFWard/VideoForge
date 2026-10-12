@@ -16,11 +16,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ComfyClient } from '../mcp/comfy.js';
-import { placeholderShot, probe, stillToVideo } from '../util/ffmpeg.js';
+import { LtxClient } from '../mcp/ltx.js';
+import { placeholderShot, probe, stillToVideo, extractFrame } from '../util/ffmpeg.js';
 import { cacheKey, readCacheEntry, writeCacheEntry } from '../util/cache.js';
 import { randomSeed, resolveMotion, wantsDiffusionMotion, zoompanFilter } from './motion.js';
+import { alignFrames, resolveLtxResolution } from './ltx.js';
 
-export const BACKENDS = ['auto', 'comfy', 'mock'];
+export const BACKENDS = ['auto', 'comfy', 'ltx', 'mock'];
 
 export class VisualRenderer {
   /**
@@ -30,10 +32,20 @@ export class VisualRenderer {
    *   consistent visual style instead of looking like a patchwork.
    *   `seedBase` (usually the topic) gives every scene a deterministic
    *   diffusion seed, so reruns and cache lookups agree.
+   *   `references` are uploaded images/videos used as LTX-Video conditioning.
    */
   constructor(
     config,
-    { logger = null, onProgress = null, look = '', negative = '', steps = 25, cfg = 7, seedBase = '' } = {},
+    {
+      logger = null,
+      onProgress = null,
+      look = '',
+      negative = '',
+      steps = 25,
+      cfg = 7,
+      seedBase = '',
+      references = [],
+    } = {},
   ) {
     this.config = config;
     this.logger = logger;
@@ -43,8 +55,11 @@ export class VisualRenderer {
     this.steps = steps;
     this.cfg = cfg;
     this.seedBase = seedBase;
+    // Reference media for LTX-Video conditioning: [{path, strength, startFrame}].
+    this.references = Array.isArray(references) ? references : [];
     this.backend = null;
     this.comfy = null;
+    this.ltx = null;
     this.reason = null;
     this.cache = { hits: 0, misses: 0 };
   }
@@ -59,8 +74,14 @@ export class VisualRenderer {
   }
 
   /**
-   * Decide which backend to use. `auto` probes ComfyUI and degrades gracefully
-   * rather than throwing, because a topic should still render without a GPU.
+   * Decide which backend to use. `auto` probes for a real renderer and degrades
+   * gracefully rather than throwing, because a topic should still render even
+   * with no GPU and no diffusion server at all.
+   *
+   * Order in `auto` is ComfyUI, then LTX-Video, then mock: ComfyUI is the more
+   * general install and has the workflow ecosystem behind it. Asking for a
+   * backend by name skips the probing and fails loudly instead, which is what
+   * "I explicitly want this renderer" should mean.
    */
   async init() {
     if (this.config.backend === 'mock') {
@@ -69,37 +90,83 @@ export class VisualRenderer {
       return this;
     }
 
-    this.comfy = new ComfyClient(this.config, { logger: this.logger });
-    const health = await this.comfy.health();
-
-    if (health.ok) {
-      this.backend = 'comfy';
-      const detail = health.detail ?? {};
-      this.reason = `ComfyUI ${detail.comfyui ?? '?'} on ${detail.device ?? '?'}`;
-      this.logger?.ok?.(`Visual backend: comfy (${this.reason})`);
-      return this;
+    if (this.config.backend === 'ltx' || this.config.backend === 'auto') {
+      if (await this.initLtx(this.config.backend === 'ltx')) return this;
+      if (this.config.backend === 'ltx') throw this.ltxError;
     }
 
-    if (this.config.backend === 'comfy') {
+    if (this.config.backend === 'comfy' || this.config.backend === 'auto') {
+      this.comfy = new ComfyClient(this.config, { logger: this.logger });
+      const health = await this.comfy.health();
+
+      if (health.ok) {
+        this.backend = 'comfy';
+        const detail = health.detail ?? {};
+        this.reason = `ComfyUI ${detail.comfyui ?? '?'} on ${detail.device ?? '?'}`;
+        this.logger?.ok?.(`Visual backend: comfy (${this.reason})`);
+        return this;
+      }
+
+      if (this.config.backend === 'comfy') {
+        await this.comfy.close();
+        this.comfy = null;
+        throw new Error(
+          `VIDEO_FORGE_BACKEND=comfy but ComfyUI is unreachable at ${this.config.comfyUrl}.\n` +
+            `${health.detail?.error ?? ''}\n` +
+            'Start ComfyUI, point COMFYUI_URL at a remote or tunnelled instance, ' +
+            'or set VIDEO_FORGE_BACKEND=mock.',
+        );
+      }
+
       await this.comfy.close();
       this.comfy = null;
-      throw new Error(
-        `VIDEO_FORGE_BACKEND=comfy but ComfyUI is unreachable at ${this.config.comfyUrl}.\n` +
-          `${health.detail?.error ?? ''}\n` +
-          'Start ComfyUI, point COMFYUI_URL at a remote or tunnelled instance, ' +
-          'or set VIDEO_FORGE_BACKEND=mock.',
-      );
     }
 
-    await this.comfy.close();
-    this.comfy = null;
     this.backend = 'mock';
-    this.reason = `ComfyUI unreachable at ${this.config.comfyUrl}`;
+    this.reason =
+      this.ltxUnreachable ?? `ComfyUI unreachable at ${this.config.comfyUrl}`;
     this.logger?.warn?.(
       `Visual backend: mock (${this.reason}). Rendering placeholder footage; ` +
-        'start ComfyUI or set COMFYUI_URL for real diffusion.',
+        'start ComfyUI, run `npm run setup:ltx` for local LTX-Video, ' +
+        'or set COMFYUI_URL for real diffusion.',
     );
     return this;
+  }
+
+  /**
+   * Probe the LTX-Video MCP server. Returns true when it can render.
+   *
+   * `required` separates "the user asked for LTX" (surface the real error) from
+   * "auto is just checking" (stay quiet - another backend may still work).
+   */
+  async initLtx(required) {
+    this.ltx = new LtxClient(this.config, { logger: this.logger });
+    const health = await this.ltx.health();
+
+    if (health.ok) {
+      this.backend = 'ltx';
+      const detail = health.detail ?? {};
+      this.reason =
+        `LTX-Video ${detail.version ?? '?'} on ${detail.device ?? '?'}` +
+        (detail.vramGb ? ` (${detail.vramGb} GB VRAM)` : '');
+      this.logger?.ok?.(`Visual backend: ltx (${this.reason})`);
+      return true;
+    }
+
+    await this.ltx.close().catch(() => {});
+    this.ltx = null;
+
+    const detail = health.detail ?? {};
+    const error = detail.error ?? 'unknown error';
+    this.ltxUnreachable = `LTX-Video unavailable (${firstLine(error)})`;
+    this.ltxError = new Error(
+      `VIDEO_FORGE_BACKEND=ltx but LTX-Video is not ready.\n${error}\n` +
+        'Run `npm run setup:ltx` to install it, then `npm run doctor` to verify.',
+    );
+
+    if (required) this.logger?.error?.(`LTX-Video backend unavailable: ${firstLine(error)}`);
+    else this.logger?.debug?.(`ltx: unavailable (${firstLine(error)})`);
+    return false;
   }
 
   /**
@@ -213,9 +280,10 @@ export class VisualRenderer {
    * Render one scene end-to-end.
    *
    * The ladder, most desirable first:
-   *   1. diffusion keyframe -> diffusion image-to-video  (best quality)
-   *   2. diffusion keyframe -> Ken Burns push            (no video model needed)
-   *   3. ffmpeg placeholder                              (no ComfyUI at all)
+   *   1. LTX-Video diffusion clip     (native video diffusion, real motion)
+   *   2. diffusion keyframe -> diffusion image-to-video  (ComfyUI)
+   *   3. diffusion keyframe -> Ken Burns push            (no video model needed)
+   *   4. ffmpeg placeholder                              (no renderer at all)
    *
    * Returns an un-normalised motion clip plus the keyframe that produced it,
    * the resolved motion preset, the deterministic seed and whether the
@@ -229,6 +297,34 @@ export class VisualRenderer {
     const tag = String(index).padStart(2, '0');
     const targetStill = path.join(outDir, `scene${tag}_still.png`);
     const rawClip = path.join(outDir, `scene${tag}_raw.mp4`);
+
+    // 0. LTX-Video: a real video diffusion render, in one shot. -----------------
+    if (this.backend === 'ltx') {
+      try {
+        const rendered = await this.renderLtxScene({ scene, index, outDir, fps });
+        if (rendered?.clip && fs.existsSync(rendered.clip)) {
+          fs.copyFileSync(rendered.clip, rawClip);
+          return {
+            still: rendered.still,
+            clip: rawClip,
+            method: 'ltx-video',
+            backend: 'ltx',
+            motion: 'video',
+            seed: rendered.seed,
+            cached: false,
+            model: rendered.model,
+            references: rendered.references,
+            renderSeconds: rendered.renderSeconds,
+          };
+        }
+      } catch (error) {
+        this.logger?.warn?.(
+          `scene ${index}: LTX-Video render failed (${firstLine(error.message)}); ` +
+            'falling back to placeholder footage.',
+        );
+      }
+      return this.renderPlaceholder({ scene, index, outDir, rawClip, fps, renderWidth, renderHeight });
+    }
 
     let still = null;
     let cached = false;
@@ -303,6 +399,115 @@ export class VisualRenderer {
     }
 
     // 3. Placeholder ----------------------------------------------------------
+    return this.renderPlaceholder({ scene, index, rawClip, fps, renderWidth, renderHeight });
+  }
+
+  /**
+   * Render a scene with LTX-Video.
+   *
+   * Unlike the ComfyUI ladder there is no separate keyframe step: LTX-Video is a
+   * *video* model, so one call produces the moving shot directly. The frame count
+   * is derived from the narration timing so the clip lines up with the timeline,
+   * then snapped to the model's `N * 8 + 1` lattice.
+   *
+   * References are attached per scene. A reference the storyboard tagged for this
+   * scene conditions it; the run-wide uploads condition the first scene (so
+   * "here is my product photo" works without editing the storyboard).
+   *
+   * @returns {Promise<{clip: string, still: string|null, seed: number|null, model: string, references: object[], renderSeconds: number}>}
+   */
+  async renderLtxScene({ scene, index, outDir, fps }) {
+    const seed = this.seedFor(scene, index);
+    const clipSeconds = Math.max(1, Number(scene.seconds) || 5);
+    const numFrames = alignFrames(clipSeconds * fps);
+
+    // Resolution: what the model should actually draw. 'bin' mode snaps to a
+    // training aspect ratio, which produces noticeably better pictures off-spec.
+    const target = resolveLtxResolution({
+      width: this.config.render.width,
+      height: this.config.render.height,
+      mode: this.config.ltx.resolutionMode,
+    });
+
+    const sceneReferences = this.referencesForScene(scene, index);
+    const prompt = this.look ? `${scene.videoPrompt}. ${this.look}` : scene.videoPrompt;
+
+    this.logger?.debug?.(
+      `scene ${index}: LTX-Video ${target.width}x${target.height}x${numFrames} ` +
+        `seed ${seed}${sceneReferences.length ? `, ${sceneReferences.length} reference(s)` : ''}`,
+    );
+
+    const result = await this.ltx.generate({
+      prompt,
+      negativePrompt: this.negative,
+      outputPath: outDir,
+      model: this.config.ltx.model,
+      height: target.height,
+      width: target.width,
+      numFrames,
+      frameRate: Math.round(fps),
+      seed,
+      precision: this.config.ltx.precision,
+      sampler: this.config.ltx.sampler,
+      stgMode: this.config.ltx.stgMode,
+      enhancePrompt: this.config.ltx.enhancePrompt,
+      offloadToCpu: this.config.ltx.offloadToCpu,
+      imageCondNoiseScale: this.config.ltx.imageCondNoiseScale,
+      references: sceneReferences,
+    });
+
+    const clip = result.path;
+    if (!clip || !fs.existsSync(clip)) {
+      throw new Error(`LTX-Video reported ${clip ?? 'no path'} but no file exists there.`);
+    }
+
+    const info = await probe(clip, this.config.ffprobe);
+    if (!info?.hasVideo) {
+      throw new Error(`LTX-Video wrote ${clip}, but ffprobe found no video stream in it.`);
+    }
+
+    // A representative still keeps the thumbnail pipeline working unchanged.
+    let still = null;
+    try {
+      still = await extractFrame({
+        input: clip,
+        output: path.join(outDir, `scene${String(index).padStart(2, '0')}_still.png`),
+        at: 0,
+        ffmpeg: this.config.ffmpeg,
+      });
+    } catch {
+      /* a missing still must never fail a successful render */
+    }
+
+    return {
+      clip,
+      still,
+      seed,
+      model: result.model,
+      references: result.conditioning ?? [],
+      renderSeconds: result.renderSeconds ?? null,
+    };
+  }
+
+  /**
+   * Which references condition a given scene.
+   *
+   * A scene's own `reference`/`references` win outright. Otherwise the run-wide
+   * uploads condition the first scene only - conditioning every scene with the
+   * same picture would fight the per-scene prompts and flatten the whole video.
+   */
+  referencesForScene(scene, index) {
+    const own = Array.isArray(scene?.references)
+      ? scene.references
+      : scene?.reference
+        ? [scene.reference]
+        : [];
+    if (own.length > 0) return own;
+    return index === 1 ? this.references : [];
+  }
+
+  /** Offline placeholder footage - the last rung of the degradation ladder. */
+  async renderPlaceholder({ scene, index, rawClip, fps, renderWidth, renderHeight }) {
     await placeholderShot({
       output: rawClip,
       width: renderWidth,
@@ -326,7 +531,9 @@ export class VisualRenderer {
 
   async close() {
     await this.comfy?.close();
+    await this.ltx?.close();
     this.comfy = null;
+    this.ltx = null;
   }
 }
 

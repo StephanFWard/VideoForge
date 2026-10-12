@@ -57,12 +57,28 @@ function main() {
     process.exit(1);
   }
 
+  // CUDA wheels only pay off on NVIDIA hardware; Kokoro runs on CPU anyway, so
+  // GPU-less machines get the much smaller CPU index instead of several GB of
+  // unusable CUDA runtimes (same rule as scripts/setup-ltx.js).
+  const nvidia = spawnSync('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'], {
+    encoding: 'utf8',
+  });
+  const cpuIndex = nvidia.error || nvidia.status !== 0;
+  // `unsafe-best-match` lets uv pick the best version across PyPI and the CPU
+  // index (its default first-index strategy deadlocks when the CPU index ships
+  // an old transitive pin). `--link-mode copy` avoids hardlink failures when
+  // the venv lives inside OneDrive or another cloud-synced folder.
+  const indexArgs = cpuIndex
+    ? ['--extra-index-url', 'https://download.pytorch.org/whl/cpu', '--index-strategy', 'unsafe-best-match']
+    : [];
+  if (cpuIndex) console.log('\nNo NVIDIA GPU detected — using the CPU-only PyTorch index.');
+
   console.log('Installing Kokoro dependencies (this downloads PyTorch; be patient)…');
   if (has('uv')) {
-    run('uv', ['pip', 'install', '--python', venvPython, '-r', REQUIREMENTS]);
+    run('uv', ['pip', 'install', '--python', venvPython, '-r', REQUIREMENTS, '--link-mode', 'copy', ...indexArgs]);
   } else {
     run(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip']);
-    run(venvPython, ['-m', 'pip', 'install', '-r', REQUIREMENTS]);
+    run(venvPython, ['-m', 'pip', 'install', '-r', REQUIREMENTS, ...indexArgs]);
   }
 
   console.log('\nKokoro MCP server ready:');

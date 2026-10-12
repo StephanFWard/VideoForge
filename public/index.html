@@ -63,12 +63,39 @@
   .status { margin-top: 14px; color: var(--dim); font-size: .85rem; }
   .hint { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--warn); border-radius: 8px;
     color: var(--warn); font-size: .82rem; line-height: 1.5; }
+  /* Reference uploads (LTX-Video conditioning). */
+  .drop {
+    margin-top: 6px; padding: 18px; text-align: center; cursor: pointer;
+    border: 1px dashed var(--border); border-radius: 8px; background: var(--panel2);
+    color: var(--dim); font-size: .88rem; line-height: 1.6;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); color: var(--text); }
+  .drop strong { color: var(--accent); }
+  .refs { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .ref {
+    display: flex; gap: 10px; align-items: center; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel2); font-size: .84rem;
+  }
+  .ref .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ref .tag { font-size: .68rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim); }
+  .ref .tag.image { color: var(--accent); border-color: var(--accent); }
+  .ref .tag.video { color: var(--accent2); border-color: var(--accent2); }
+  .ref input[type="number"] { width: 76px; padding: 5px 7px; font-size: .82rem; }
+  .ref button.remove {
+    width: auto; margin: 0; padding: 4px 10px; font-size: .74rem; font-weight: 600;
+    background: transparent; color: var(--err); border: 1px solid var(--border); border-radius: 6px;
+  }
+  .ref button.remove:hover { border-color: var(--err); }
+  .field { font-size: .74rem; color: var(--dim); display: flex; align-items: center; gap: 4px; }
+  details.settings { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; padding: 0 12px; }
+  details.settings summary { cursor: pointer; padding: 10px 0; color: var(--dim); font-size: .84rem; }
+  details.settings[open] summary { color: var(--text); }
 </style>
 </head>
 <body>
 <header>
   <h1>Video<span>Forge</span></h1>
-  <p>Topic in, finished video out — ComfyUI MCP for visuals, Kokoro MCP for narration, ffmpeg for the final cut. All local.</p>
+  <p>Topic in, finished video out — LTX-Video for local video diffusion, ComfyUI MCP for visuals, Kokoro MCP for narration, ffmpeg for the final cut.</p>
 </header>
 <main>
   <section class="card">
@@ -82,10 +109,35 @@
       <div><label for="voice">Kokoro voice</label>
         <select id="voice"><option value="af_heart" selected>af_heart</option><option value="af_bella">af_bella</option><option value="am_michael">am_michael</option><option value="am_adam">am_adam</option><option value="bf_emma">bf_emma</option><option value="bm_george">bm_george</option></select></div>
       <div><label for="backend">Visual backend</label>
-        <select id="backend"><option value="auto" selected>auto</option><option value="comfy">comfy</option><option value="mock">mock</option></select></div>
+        <select id="backend"><option value="auto" selected>auto</option><option value="comfy">comfy</option><option value="ltx">LTX-Video (local)</option><option value="mock">mock</option></select></div>
       <div><label for="transition">Scene transition</label>
         <select id="transition"><option value="none" selected>none (hard cut)</option><option value="fade">fade (dip to black)</option><option value="crossfade">crossfade (overlap)</option></select></div>
     </div>
+
+    <label for="reference-input">Reference pictures or videos (optional)</label>
+    <div class="drop" id="drop">
+      <strong>Drop files here</strong> or click to choose<br />
+      Images (png, jpg, webp) or videos (mp4, mov, webm) - they condition the render locally
+    </div>
+    <input id="reference-input" class="hidden" type="file" multiple
+      accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff,video/mp4,video/quicktime,video/webm,video/x-msvideo,video/x-matroska" />
+    <div class="refs" id="references"></div>
+    <div class="status" id="reference-status"></div>
+
+    <details class="settings">
+      <summary>LTX-Video settings</summary>
+      <div class="row">
+        <div><label for="ltx-model">Pipeline preset</label>
+          <input id="ltx-model" type="text" placeholder="ltxv-2b-0.9.8-distilled.yaml" /></div>
+        <div><label for="reference-strength">Reference strength (0–1)</label>
+          <input id="reference-strength" type="number" min="0" max="1" step="0.05" value="1" /></div>
+        <div><label for="reference-start">First reference frame</label>
+          <input id="reference-start" type="number" min="0" step="1" value="0" /></div>
+      </div>
+      <p class="status">The preset list is shown by <code>video-forge models</code>. Frame counts must be
+        <code>N × 8 + 1</code> (9, 17, 25…) and sizes divisible by 32; VideoForge snaps them for you.</p>
+    </details>
+
     <button id="generate">Generate video</button>
     <div class="status" id="health"></div>
   </section>

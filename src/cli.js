@@ -18,17 +18,20 @@ import { ffmpegAvailable } from './util/ffmpeg.js';
 import { forge, forgeStill } from './pipeline/forge.js';
 import { loadStoryboard, planFromTopic } from './pipeline/planner.js';
 import { ComfyClient } from './mcp/comfy.js';
+import { LtxClient } from './mcp/ltx.js';
 import { KokoroNarration } from './mcp/kokoro.js';
+import { LTX_MODELS } from './pipeline/ltx.js';
 
 const USAGE = `
-VideoForge - turn a topic into a finished video with ComfyUI MCP + Kokoro MCP.
+VideoForge - turn a topic into a finished video with LTX-Video, ComfyUI MCP + Kokoro MCP.
 
 USAGE
   video-forge forge [topic] [options]     Render a video
   video-forge plan  [topic] [options]     Print the storyboard, render nothing
   video-forge still [topic] [options]     Render one keyframe (preview a scene)
-  video-forge doctor                      Check dependencies and both MCP servers
+  video-forge doctor                      Check dependencies and every MCP server
   video-forge voices [--lang en-us]       List available Kokoro voices
+  video-forge models                      List LTX-Video pipeline presets
   video-forge connect <comfyui-url>       Save a ComfyUI URL (local or tunnelled)
   video-forge serve [--port 4321]         Start the web UI
 
@@ -37,7 +40,7 @@ OPTIONS
   -s, --storyboard <file>   Use a hand-authored storyboard JSON instead of a topic
       --scenes <n>          Scene count for the template planner (default: intent-based)
       --resolution <r>      720p | 1080p | 4k          (default: 4k)
-      --backend <b>         auto | comfy | mock        (default: auto)
+      --backend <b>         auto | comfy | ltx | mock  (default: auto)
       --voice <name>        Kokoro voice                (default: af_heart)
       --speed <n>           Narration speed 0.5-2.0    (default: 1.0)
       --transition <t>      none | fade | crossfade    (default: none)
@@ -50,6 +53,12 @@ OPTIONS
       --json                Machine-readable output summary
   -h, --help                Show this help
 
+LTX-VIDEO OPTIONS (local video diffusion)
+      --ltx-model <file>    Pipeline preset (run \`video-forge models\` to list them)
+      --reference <path>    Condition on an image or video. Repeatable.
+      --reference-strength <n>  How strictly references are obeyed, 0..1 (default: 1)
+      --reference-start <n>     Frame each reference appears at (default: 0)
+
 EXAMPLES
   video-forge forge "how to brew better coffee" --scenes 5
   video-forge forge --storyboard my-video.storyboard.json --resolution 4k
@@ -57,7 +66,15 @@ EXAMPLES
   video-forge still "how to brew better coffee" --scene 2 --out preview.png
   video-forge doctor
   video-forge connect https://random-words-here.trycloudflare.com
+
+  # local video diffusion - no ComfyUI required
+  video-forge forge "a lighthouse in a storm" --backend ltx
+  video-forge forge "animate my product" --backend ltx --reference ./product.png
+  video-forge forge "continue this clip" --backend ltx --reference ./shot.mp4 --reference-start 60
 `;
+
+/** Flags that may be repeated, collecting into an array. */
+const REPEATABLE = new Set(['reference']);
 
 /** Minimal, dependency-free flag parser: supports --k v, --k=v and booleans. */
 export function parseFlags(argv) {
@@ -82,7 +99,14 @@ export function parseFlags(argv) {
           value = true;
         }
       }
-      flags[key] = value;
+
+      // `--reference` may be given several times; keep every value in order.
+      if (REPEATABLE.has(key)) {
+        if (!Array.isArray(flags[key])) flags[key] = [];
+        if (value !== true) flags[key].push(value);
+      } else {
+        flags[key] = value;
+      }
     } else {
       flags._.push(token);
     }
@@ -103,7 +127,45 @@ export function configFromFlags(flags) {
   if (flags.transition) overrides.transition = flags.transition;
   if (flags['no-cache']) overrides.cache = false;
   if (flags.comfyUrl) overrides.comfyUrl = flags.comfyUrl;
+  if (flags['ltx-model']) overrides.ltxModel = String(flags['ltx-model']);
   return overrides;
+}
+
+/**
+ * Turn `--reference` flags into LTX-Video conditioning items.
+ *
+ * `--reference-strength` and `--reference-start` accept either one value (applied
+ * to every reference) or a comma-separated list (matched positionally), so both
+ * `--reference a.png --reference b.png --reference-start 0,60` and the simpler
+ * single-value form work.
+ *
+ * @param {object} flags
+ * @returns {Array<{path: string, strength: number, startFrame: number}>}
+ */
+export function referencesFromFlags(flags) {
+  const paths = Array.isArray(flags.reference)
+    ? flags.reference
+    : flags.reference && flags.reference !== true
+      ? [flags.reference]
+      : [];
+  if (paths.length === 0) return [];
+
+  const list = (value, fallback) => {
+    if (value === undefined || value === null || value === true) return null;
+    return String(value)
+      .split(',')
+      .map((part) => Number(part.trim()))
+      .filter((n) => Number.isFinite(n));
+  };
+
+  const strengths = list(flags['reference-strength']);
+  const starts = list(flags['reference-start']);
+
+  return paths.map((path, index) => ({
+    path: String(path),
+    strength: strengths ? (strengths[index] ?? strengths[strengths.length - 1]) : 1,
+    startFrame: starts ? (starts[index] ?? starts[starts.length - 1]) : 0,
+  }));
 }
 
 const topicFrom = (flags) => {
@@ -151,10 +213,17 @@ async function cmdForge(flags) {
     transition: flags.transition && flags.transition !== true ? String(flags.transition) : undefined,
     planOnly: Boolean(flags['plan-only']),
     silent: Boolean(flags.json),
+    references: referencesFromFlags(flags),
   });
 
   if (flags['plan-only']) {
     console.log(JSON.stringify(result.storyboard, null, 2));
+    if (result.references?.length) {
+      console.error(
+        `# ${result.references.length} reference item(s): ` +
+          result.references.map((r) => `${r.path} @${r.startFrame}`).join(', '),
+      );
+    }
     return;
   }
   if (flags.json) console.log(JSON.stringify(summarise(result), null, 2));
@@ -177,6 +246,46 @@ async function cmdPlan(flags) {
   console.error(`# ${mode} storyboard from ${source}`);
   for (const warning of warnings) console.error(`# warning: ${warning}`);
   console.log(JSON.stringify(storyboard, null, 2));
+}
+
+/**
+ * List the LTX-Video pipeline presets, and whether each one's weights are
+ * already on disk. Reports an uninstalled runtime gracefully, because `models`
+ * should stay useful while LTX-Video has not been set up yet.
+ */
+async function cmdModels(flags) {
+  const config = loadConfig(configFromFlags(flags));
+  const ltx = new LtxClient(config);
+
+  try {
+    const { models, error } = await ltx.listModels();
+
+    if (flags.json) {
+      console.log(JSON.stringify({ ok: !error, models: models ?? [], error }, null, 2));
+      return;
+    }
+
+    if (error || !models.length) {
+      console.log(`\nLTX-Video is not installed or not reachable.${error ? `\n  ${error}` : ''}\n`);
+      console.log(`Bundled pipeline presets (${LTX_MODELS.length}):`);
+      for (const model of LTX_MODELS) console.log(`  ${model}`);
+      console.log('\nRun `npm run setup:ltx` to install LTX-Video, then `npm run doctor`.');
+      return;
+    }
+
+    console.log(`\nLTX-Video pipeline presets (${models.length})\n`);
+    for (const model of models) {
+      const weights = model.local ? 'weights already local' : 'downloads on first use';
+      const passes = model.multi_scale ? `, ${model.second_pass_steps ?? '?'} 2nd-pass steps` : '';
+      console.log(
+        `  ${model.config}\n` +
+          `      ${model.pipeline_type} · ${model.precision ?? 'default'} · ` +
+          `${model.num_inference_steps} steps${passes} · ${weights}`,
+      );
+    }
+  } finally {
+    await ltx.close();
+  }
 }
 
 /**
@@ -295,22 +404,48 @@ async function cmdDoctor() {
 
   if (config.backend === 'mock') {
     add('ComfyUI MCP', true, 'skipped (VIDEO_FORGE_BACKEND=mock)');
+    add('LTX-Video MCP', true, 'skipped (VIDEO_FORGE_BACKEND=mock)');
   } else {
-    const client = new ComfyClient(config);
+    if (config.backend !== 'ltx') {
+      const client = new ComfyClient(config);
+      try {
+        const health = await client.health();
+        add(
+          'ComfyUI MCP',
+          Boolean(health.ok),
+          health.ok
+            ? `ComfyUI ${health.detail.comfyui} on ${health.detail.device}, ` +
+                `${health.detail.vramFreeGb ?? '?'} GB free`
+            : `${config.comfyUrl} unreachable - visuals will fall back`,
+        );
+      } catch (error) {
+        add('ComfyUI MCP', false, error.message.split('\n')[0]);
+      } finally {
+        await client.close();
+      }
+    } else {
+      add('ComfyUI MCP', true, 'skipped (VIDEO_FORGE_BACKEND=ltx)');
+    }
+
+    // LTX-Video: the local video diffusion backend. Never fatal - it is an
+    // alternative to ComfyUI, not a requirement - but the reason it is missing
+    // (not installed vs. installed but broken) is what the user needs.
+    const ltx = new LtxClient(config);
     try {
-      const health = await client.health();
+      const health = await ltx.health();
       add(
-        'ComfyUI MCP',
+        'LTX-Video MCP',
         Boolean(health.ok),
         health.ok
-          ? `ComfyUI ${health.detail.comfyui} on ${health.detail.device}, ` +
-              `${health.detail.vramFreeGb ?? '?'} GB free`
-          : `${config.comfyUrl} unreachable - visuals will fall back to mock`,
+          ? `LTX-Video ${health.detail.version} on ${health.detail.device}` +
+              (health.detail.vramGb ? `, ${health.detail.vramGb} GB VRAM` : '') +
+              `, ${health.detail.presets} preset(s)`
+          : `${health.detail?.error ?? 'unavailable'}${health.detail?.hint ? ` - run npm run setup:ltx` : ''}`,
       );
     } catch (error) {
-      add('ComfyUI MCP', false, error.message.split('\n')[0]);
+      add('LTX-Video MCP', false, error.message.split('\n')[0]);
     } finally {
-      await client.close();
+      await ltx.close();
     }
   }
 
@@ -322,7 +457,8 @@ async function cmdDoctor() {
   console.log(
     failed.length
       ? `\n${failed.length} check(s) failed. Narration and assembly still work; ` +
-          'visuals fall back to the offline mock renderer.\n'
+          'visuals fall back to the offline mock renderer.\n' +
+          'Tip: `npm run setup:ltx` enables local video diffusion without ComfyUI.\n'
       : '\nAll checks passed.\n',
   );
   if (failed.length) process.exitCode = 1;
@@ -355,6 +491,9 @@ export async function main(argv = process.argv.slice(2)) {
       break;
     case 'still':
       await cmdStill(flags);
+      break;
+    case 'models':
+      await cmdModels(flags);
       break;
     case 'doctor':
       await cmdDoctor();

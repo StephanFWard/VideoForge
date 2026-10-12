@@ -1,0 +1,37 @@
+# LTX-Video MCP server (video diffusion) - installed into `.venv-ltx`.
+#
+# The version pins matter. `ltx-video` was tested against transformers < 4.52,
+# and the reference-media loader uses `av` (PyAV) for the CRF pre-compression
+# step that keeps conditioning stills in the same codec space the VAE was
+# trained on. Torch pulls a large wheel; on CPU-only boxes prefer the index at
+# https://download.pytorch.org/whl/cpu to save several GB.
+
+# --- LTX-Video itself -------------------------------------------------------
+ltx-video==0.1.2
+
+# --- MCP transport ----------------------------------------------------------
+mcp>=2.0
+
+# --- Inference runtime (the upstream `inference` extra, pinned) -------------
+# ltx-video already declares these, but pinning them here means `npm run
+# setup:ltx` produces a reproducible environment instead of whatever the
+# resolver picks that day.
+diffusers>=0.28.2
+transformers>=4.47.2,<4.52.0
+accelerate>=0.31.0
+safetensors>=0.4.4
+sentencepiece>=0.1.96
+huggingface-hub~=0.30
+einops
+timm
+imageio[ffmpeg]>=2.34
+imageio-ffmpeg>=0.4.9
+av>=12.0.0
+torchvision
+
+# --- YAML pipeline presets --------------------------------------------------
+PyYAML>=6.0
+
+# --- Optional: FP8 inference kernels (Ada GPUs and newer) -------------------
+# Not installable from PyPI. See https://github.com/Lightricks/LTXVideo-Q8-Kernels
+# and enable the `ltxv-*-fp8.yaml` presets afterwards.

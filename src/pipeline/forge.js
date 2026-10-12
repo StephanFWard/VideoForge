@@ -18,6 +18,7 @@ import { ensureDir, runStamp, slugify, writeJson } from '../util/fs.js';
 import { ffmpegAvailable, placeholderStill } from '../util/ffmpeg.js';
 import { loadStoryboard } from './planner.js';
 import { VisualRenderer } from './visuals.js';
+import { resolveReferences, referenceSetId } from './references.js';
 import { KokoroNarration } from '../mcp/kokoro.js';
 import { narrateScenes } from './audio.js';
 import { assembleVideo } from './assemble.js';
@@ -36,6 +37,8 @@ import { buildTimeline } from './timeline.js';
  * @param {string}   [req.transition]      default scene entry transition
  * @param {boolean}  [req.planOnly]        stop after planning
  * @param {boolean}  [req.silent]
+ * @param {Array<object>} [req.references] uploaded images/videos for LTX-Video
+ *                                        conditioning: [{path, strength, startFrame}]
  */
 export async function forge({
   topic,
@@ -47,6 +50,7 @@ export async function forge({
   transition,
   planOnly = false,
   silent = false,
+  references = [],
 } = {}) {
   const started = Date.now();
   const log = logger ?? createLogger({ silent, onEvent });
@@ -76,8 +80,39 @@ export async function forge({
   log.ok(`Storyboard ready from ${mode}: "${storyboard.title}" (${storyboard.scenes.length} scenes)`);
   for (const warning of warnings) log.warn(warning);
 
+  // Reference media (LTX-Video conditioning). Resolved here - before the run
+  // directory even exists - so a bad path or an unsupported file fails fast with
+  // a clear message instead of after a multi-gigabyte model has loaded.
+  const referenceWarnings = [];
+  const referenceList = [...(Array.isArray(references) ? references : [])];
+  for (const scene of storyboard.scenes) {
+    for (const entry of scene.references ?? []) referenceList.push(entry);
+  }
+
+  let resolvedReferences = { references: [], warnings: [] };
+  if (referenceList.length > 0) {
+    resolvedReferences = resolveReferences(referenceList, { config });
+    referenceWarnings.push(...resolvedReferences.warnings);
+
+    const described = resolvedReferences.references
+      .map((r) => `${path.basename(r.path)} (${r.kind}, strength ${r.strength}, frame ${r.startFrame})`)
+      .join('; ');
+    log.ok(`Reference media: ${resolvedReferences.references.length} item(s) - ${described}`);
+    for (const warning of resolvedReferences.warnings) log.warn(warning);
+  }
+
+  const allWarnings = [...warnings, ...referenceWarnings];
+
   if (planOnly) {
-    return { ok: true, planOnly: true, storyboard, warnings, source, mode };
+    return {
+      ok: true,
+      planOnly: true,
+      storyboard,
+      warnings: allWarnings,
+      source,
+      mode,
+      references: resolvedReferences.references,
+    };
   }
 
   // ---- 2. Prepare the run directory ---------------------------------------
@@ -97,6 +132,9 @@ export async function forge({
     // Deterministic seeds: every scene is derived from the topic, so reruns
     // (and cache lookups) agree on exactly the same keyframe.
     seedBase: storyboard.topic,
+    // Reference media (LTX-Video conditioning). Validated here, before anything
+    // expensive runs, so a bad upload fails in the planning stage.
+    references: resolvedReferences.references,
   });
 
   const segmentResults = [];
@@ -230,7 +268,22 @@ export async function forge({
         narration: 'kokoro-mcp',
         voice: config.kokoro.voice,
         cache: { enabled: config.cache, hits: renderer.cache.hits, misses: renderer.cache.misses },
+        // The LTX-Video preset that produced these clips, when it was used.
+        model: visual.backend === 'ltx' ? config.ltx.model : null,
       },
+      // Reference media this run was conditioned on, so the render is
+      // reproducible from the manifest alone.
+      references: resolvedReferences.references.length
+        ? {
+            id: referenceSetId(resolvedReferences.references),
+            items: resolvedReferences.references.map((r) => ({
+              path: r.path,
+              kind: r.kind,
+              strength: r.strength,
+              startFrame: r.startFrame,
+            })),
+          }
+        : null,
       output: {
         video: assembled.finalPath,
         master: assembled.masterPath,
@@ -254,8 +307,11 @@ export async function forge({
         still: s.still,
         clip: s.clip,
         segment: s.segment,
+        // LTX-Video specifics: the preset used, and what conditioned this scene.
+        model: s.model ?? null,
+        references: s.references?.length ? s.references : null,
       })),
-      warnings,
+      warnings: allWarnings,
       timings: { totalSeconds: Math.round((Date.now() - started) / 100) / 10 },
     };
 
@@ -281,8 +337,9 @@ export async function forge({
       timeline,
       backend: visual.backend,
       backendDetail: visual.reason,
-      warnings,
+      warnings: allWarnings,
       storyboard,
+      references: resolvedReferences.references,
     };
   } finally {
     await narration?.close();

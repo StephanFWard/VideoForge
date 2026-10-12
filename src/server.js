@@ -29,8 +29,41 @@ import { forge } from './pipeline/forge.js';
 import { TRANSITIONS } from './pipeline/storyboard.js';
 import { ffmpegAvailable } from './util/ffmpeg.js';
 import { ComfyClient } from './mcp/comfy.js';
+import { LtxClient } from './mcp/ltx.js';
+import { saveReferenceUpload, clearReferences, resolveReferences } from './pipeline/references.js';
+import { isReferenceFile, referenceKind } from './pipeline/ltx.js';
+
+/** Uploaded reference media is capped per file, so a browser cannot exhaust RAM. */
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
 
 const MAX_EVENTS_PER_RUN = 600;
+
+/**
+ * Every reference uploaded under a stamp, as LTX-Video conditioning descriptors.
+ *
+ * Filenames are ordered, because conditioning order is meaningful: the model
+ * applies the items in list order, so a stable sort keeps a re-upload of the same
+ * set in the same order. `strength`/`startFrame` stay at their defaults here -
+ * the renderer and `normalizeReferences` resolve the final values.
+ */
+function listReferences(config, stamp) {
+  const dir = path.join(config.referencesDir, String(stamp));
+  if (!/^[\w.-]+$/.test(String(stamp)) || !fs.existsSync(dir)) return [];
+
+  return fs
+    .readdirSync(dir)
+    .filter((name) => isReferenceFile(name))
+    .sort()
+    .map((name) => ({
+      id: `${stamp}/${name}`,
+      path: path.join(dir, name),
+      filename: name,
+      kind: referenceKind(name),
+      strength: 1,
+      startFrame: 0,
+      bytes: fs.statSync(path.join(dir, name)).size,
+    }));
+}
 
 function isLocalhostUrl(url) {
   try {
@@ -180,7 +213,7 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
         'http://videoforge-comfyui:8188 (see docs/deploy-render.md).';
     }
 
-    if (config.backend !== 'mock') {
+    if (config.backend !== 'mock' && config.backend !== 'ltx') {
       const client = new ComfyClient(config);
       try {
         health.comfy = await client.health();
@@ -190,8 +223,28 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
         await client.close().catch(() => {});
       }
     } else {
-      health.comfy = { ok: true, detail: { device: 'skipped (mock backend)' } };
+      health.comfy = { ok: true, detail: { device: `skipped (${config.backend} backend)` } };
     }
+
+    // LTX-Video is a *local* video diffusion backend - an alternative to
+    // ComfyUI, not a requirement, so a missing install is reported rather than
+    // fatal. `ready` tells the UI whether to offer it.
+    const ltx = new LtxClient(config);
+    try {
+      health.ltx = await ltx.health();
+    } catch (error) {
+      health.ltx = { ok: false, detail: { error: error.message.split('\n')[0] } };
+    } finally {
+      await ltx.close().catch(() => {});
+    }
+
+    if (config.backend === 'ltx' && !health.ltx?.ok) {
+      health.hint =
+        `${health.ltx?.detail?.error ?? 'LTX-Video is not ready'}. ` +
+        'Run `npm run setup:ltx`, or switch the backend to auto.';
+    }
+    health.backends = { comfy: health.comfy.ok, ltx: Boolean(health.ltx?.ok) };
+    health.maxReferences = config.maxReferenceUploads;
 
     health.kokoro = {
       ok: fs.existsSync(config.kokoroMcp.command),
@@ -206,6 +259,94 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
 
     health.ok = health.ffmpeg && (health.comfy.ok || config.backend !== 'comfy');
     res.json(health);
+  });
+
+  // ---- reference uploads (LTX-Video conditioning) ---------------------------
+  //
+  // A reference is an uploaded picture or video that the generation is
+  // conditioned on - LTX-Video's "conditioning items". Uploads are written
+  // straight to the local work directory: nothing is proxied anywhere, which is
+  // what keeps a reference-conditioned render fully local.
+  //
+  // The body is the raw file bytes with the filename in a header, rather than
+  // multipart/form-data, because Express 5 has no built-in multipart parser and
+  // VideoForge deliberately ships without extra dependencies.
+  app.post(
+    '/api/references',
+    express.raw({ type: '*/*', limit: MAX_UPLOAD_BYTES }),
+    async (req, res) => {
+      const stamp = String(req.query.stamp ?? '').trim() || crypto.randomBytes(6).toString('hex');
+      const rawName = String(
+        req.headers['x-filename'] ?? req.query.filename ?? 'reference.bin',
+      );
+      const filename = decodeURIComponent(rawName);
+
+      try {
+        if (!isReferenceFile(filename)) {
+          return res.status(400).json({
+            ok: false,
+            error:
+              `"${path.basename(filename)}" is not a supported reference file. ` +
+              'Upload an image (png, jpg, jpeg, webp, bmp, tiff) or a video ' +
+              '(mp4, mov, avi, mkv, webm, m4v).',
+          });
+        }
+
+        const body = req.body;
+        if (!Buffer.isBuffer(body) || body.length === 0) {
+          return res.status(400).json({ ok: false, error: 'The upload was empty.' });
+        }
+
+        const existing = listReferences(config, stamp).length;
+        if (existing >= config.maxReferenceUploads) {
+          return res.status(400).json({
+            ok: false,
+            error:
+              `This run already has ${existing} reference(s); the limit is ` +
+              `${config.maxReferenceUploads}.`,
+          });
+        }
+
+        const saved = await saveReferenceUpload({
+          config,
+          stamp,
+          index: existing + 1,
+          filename,
+          data: body,
+        });
+
+        res.json({
+          ok: true,
+          stamp,
+          id: `${stamp}/${saved.filename}`,
+          path: saved.path,
+          filename: saved.filename,
+          kind: saved.kind,
+          bytes: saved.bytes,
+          references: listReferences(config, stamp),
+        });
+      } catch (error) {
+        res.status(400).json({ ok: false, error: error.message });
+      }
+    },
+  );
+
+  /** The references a stamp has uploaded so far, as conditioning descriptors. */
+  app.get('/api/references', (req, res) => {
+    const stamp = String(req.query.stamp ?? '').trim();
+    if (!stamp) {
+      return res.status(400).json({ ok: false, error: 'Provide a ?stamp= to list.' });
+    }
+    res.json({ ok: true, stamp, references: listReferences(config, stamp) });
+  });
+
+  /** Discard every reference uploaded under a stamp. */
+  app.delete('/api/references', (req, res) => {
+    const stamp = String(req.query.stamp ?? '').trim();
+    if (!stamp || !/^[\w.-]+$/.test(stamp)) {
+      return res.status(400).json({ ok: false, error: 'Provide a valid ?stamp=.' });
+    }
+    res.json({ ok: true, stamp, cleared: clearReferences(config, stamp) });
   });
 
   // ---- generate -----------------------------------------------------------
@@ -236,6 +377,20 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
       });
     }
 
+    // Reference media. Two ways in: a `referenceStamp` naming files already
+    // uploaded to /api/references, or explicit `references` (paths, for a
+    // scripted client). Either way the list is validated here, so a bad upload
+    // fails the request instead of the render.
+    let references = [];
+    try {
+      const raw = body.referenceStamp
+        ? listReferences(config, String(body.referenceStamp))
+        : body.references ?? [];
+      references = resolveReferences(raw, { config });
+    } catch (error) {
+      return res.status(400).json({ ok: false, error: error.message });
+    }
+
     const runConfig = loadConfig({
       ...configOverrides,
       resolution: body.resolution ?? undefined,
@@ -244,10 +399,12 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
       steps: body.steps !== undefined ? Number(body.steps) : undefined,
       backend: body.backend ?? undefined,
       fps: body.fps !== undefined ? Number(body.fps) : undefined,
+      ltxModel: body.ltxModel ? String(body.ltxModel) : undefined,
     });
 
     const run = registry.create(runConfig);
     run.topic = topic || storyboardFile;
+    run.references = references.references ?? [];
 
     const log = createLogger({
       silent: true,
@@ -278,11 +435,13 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
         cache: runConfig.cache,
         outputDir: runConfig.outputDir,
         workDir: runConfig.workDir,
+        ltxModel: body.ltxModel ?? undefined,
       },
       logger: log,
       onEvent: (event) => {
         if (event?.type) registry.publish(run, event);
       },
+      references: references.references ?? [],
     })
       .then((result) => {
         run.status = 'done';

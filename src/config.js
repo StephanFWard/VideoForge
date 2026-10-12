@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_LTX_MODEL } from './pipeline/ltx.js';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -79,9 +80,31 @@ function pythonBin() {
   return path.join(ROOT, ...rel);
 }
 
+/**
+ * The LTX-Video runtime is deliberately a *separate* virtualenv from Kokoro's.
+ *
+ * LTX-Video pins `transformers < 4.52` and needs a full torch + diffusers +
+ * PyAV stack, which is a very different dependency closure to Kokoro-82M. Two
+ * venvs means `npm run setup:ltx` can never break narration, and vice versa.
+ */
+function ltxPythonBin() {
+  const rel =
+    process.platform === 'win32'
+      ? ['.venv-ltx', 'Scripts', 'python.exe']
+      : ['.venv-ltx', 'bin', 'python'];
+  return path.join(ROOT, ...rel);
+}
+
 function splitArgs(value, fallback) {
   if (!value) return fallback;
   return value.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((a) => a.replace(/^"|"$/g, '')) ?? fallback;
+}
+
+/** Coerce a config number into a range, falling back when it is not numeric. */
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
 }
 
 export function loadConfig(overrides = {}) {
@@ -114,9 +137,24 @@ export function loadConfig(overrides = {}) {
       };
 
   const backend = String(overrides.backend ?? env('VIDEO_FORGE_BACKEND', 'auto')).toLowerCase();
-  if (!['auto', 'comfy', 'mock'].includes(backend)) {
-    throw new Error(`Invalid VIDEO_FORGE_BACKEND "${backend}". Use auto | comfy | mock.`);
+  if (!['auto', 'comfy', 'ltx', 'mock'].includes(backend)) {
+    throw new Error(`Invalid VIDEO_FORGE_BACKEND "${backend}". Use auto | comfy | ltx | mock.`);
   }
+
+  // The LTX-Video MCP server: the bundled Python one by default, or any server
+  // the user points LTX_MCP_COMMAND at.
+  const ltxCommand = overrides.ltxMcpCommand ?? env('LTX_MCP_COMMAND', null);
+  const ltxMcp = ltxCommand
+    ? {
+        command: ltxCommand,
+        args: splitArgs(env('LTX_MCP_ARGS', ''), []),
+        cwd: overrides.ltxMcpCwd ?? ROOT,
+      }
+    : {
+        command: overrides.ltxPython ?? ltxPythonBin(),
+        args: [path.join(ROOT, 'mcp-servers', 'ltx-video', 'server.py')],
+        cwd: ROOT,
+      };
 
   const resolutionKey = String(
     overrides.resolution ?? env('RESOLUTION', '4k'),
@@ -201,6 +239,38 @@ export function loadConfig(overrides = {}) {
       speed: Number(overrides.speed ?? env('KOKORO_SPEED', 1.0)),
       lang: overrides.lang ?? env('KOKORO_LANG', 'en-us'),
     },
+    // LTX-Video (local video diffusion). Everything here maps onto the model's
+    // own knobs; see src/pipeline/ltx.js for the shape rules they must obey.
+    ltxMcp,
+    ltx: {
+      // The pipeline preset (configs/*.yaml in the LTX MCP server).
+      model: overrides.ltxModel ?? env('LTX_MODEL', DEFAULT_LTX_MODEL),
+      // Where the .safetensors checkpoints live, when the user has downloaded
+      // them somewhere other than the Hugging Face cache.
+      modelDir: env('LTX_MODEL_DIR', null),
+      // Offload the text encoder / VAE to CPU between steps. Off by default
+      // because it trades speed for VRAM, and only helps below ~30 GB.
+      offloadToCpu: String(env('LTX_OFFLOAD_TO_CPU', '0')) === '1',
+      // How much noise to add to a conditioned image's latents. 0 makes
+      // image-to-video cling to the reference; higher values let it move more.
+      imageCondNoiseScale: clampNumber(
+        overrides.ltxImageCondNoiseScale ?? env('LTX_IMAGE_COND_NOISE_SCALE', 0.15),
+        0, 1, 0.15,
+      ),
+      // Automatic cinematic prompt rewriting (needs Florence-2 + Llama-3.2-3B).
+      enhancePrompt: String(env('LTX_ENHANCE_PROMPT', '0')) === '1',
+      precision: env('LTX_PRECISION', null),
+      sampler: env('LTX_SAMPLER', null),
+      stgMode: env('LTX_STG_MODE', null),
+      // 'exact' keeps the render size (aligned to /32); 'bin' snaps to the
+      // nearest training aspect-ratio bin, which looks better off-spec.
+      resolutionMode: String(env('LTX_RESOLUTION_MODE', 'exact')).toLowerCase() === 'bin'
+        ? 'bin'
+        : 'exact',
+    },
+    // Where uploaded reference images/videos are kept, and how many are allowed.
+    referencesDir: path.resolve(workDir, env('VIDEO_FORGE_REFERENCES_DIR', 'references')),
+    maxReferenceUploads: Math.max(1, Math.min(24, Number(env('VIDEO_FORGE_MAX_REFERENCES', 8)) || 8)),
     ffmpeg: env('FFMPEG_PATH', 'ffmpeg'),
     ffprobe: env('FFPROBE_PATH', 'ffprobe'),
     hfToken: env('HF_TOKEN', null),

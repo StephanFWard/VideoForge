@@ -10,6 +10,13 @@
  * Since v1.1 the storyboard also carries the animation vocabulary:
  *   motion      auto | video | kenburns | kenburns-in | kenburns-out | pan-left | pan-right
  *   transition  none | fade | crossfade   (how the scene enters)
+ *
+ * Since v1.2 a scene may also carry reference media for LTX-Video conditioning:
+ *   reference   { path, strength?, startFrame? }   one image or video
+ *   references  [ ...the same shape... ]           several, for keyframe animation
+ * These are the "conditioning items" of the LTX-Video model: `path` is an
+ * uploaded picture or video, `strength` (0..1) how strictly it is obeyed, and
+ * `startFrame` which frame of the render it appears at.
  */
 import { MOTION_PRESETS, isMotionPreset } from './motion.js';
 
@@ -122,6 +129,24 @@ export function normalizeStoryboard(raw, { config, defaults = {} } = {}) {
       );
     }
 
+    // Reference media (LTX-Video conditioning). A scene may name one or many
+    // images/videos; they are kept verbatim here and canonicalised by
+    // `normalizeReferences` at render time, which is also where a bad path or an
+    // out-of-range strength is reported against the actual clip length.
+    const rawReferences = Array.isArray(scene.references)
+      ? scene.references
+      : scene.reference
+        ? [scene.reference]
+        : [];
+    const references = rawReferences.filter(
+      (entry) => entry && (entry.path ?? entry.file ?? entry.filename),
+    );
+    if (rawReferences.length > 0 && references.length === 0) {
+      warnings.push(
+        `Scene ${index + 1}: reference entries had no path; ignoring them.`,
+      );
+    }
+
     const rawSeconds = scene.seconds ?? scene.duration;
     const seconds = clamp(rawSeconds, LIMITS.minSceneSeconds, LIMITS.maxSceneSeconds, null);
 
@@ -135,6 +160,7 @@ export function normalizeStoryboard(raw, { config, defaults = {} } = {}) {
       motion: motionValid ? motion : 'auto',
       seed: Number.isFinite(Number(scene.seed)) ? Number(scene.seed) : null,
       transition: transitionValid ? rawTransition : 'none',
+      references,
     };
 
   });

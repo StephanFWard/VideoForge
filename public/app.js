@@ -3,16 +3,32 @@ const $ = (id) => document.getElementById(id);
 const logEl = $('log'), bar = $('bar'), runCard = $('runCard');
 let evtSource = null, sceneTotal = 0, sceneDone = 0;
 
+/**
+ * The stamp every upload in this browser session is filed under. One per page
+ * load, so references uploaded for an abandoned attempt do not accumulate under
+ * a shared name - and a fresh page starts with a clean slate.
+ */
+let referenceStamp = Math.random().toString(36).slice(2, 10);
+
+/** Reference media uploaded so far, as [{id, filename, kind, strength, startFrame}]. */
+let references = [];
+
 async function refreshHealth() {
   try {
     const h = await (await fetch('/api/health')).json();
     const pill = (ok, label) => `<span class="pill ${ok ? 'ok' : 'bad'}">${label}</span>`;
     let html =
-      pill(h.comfy?.ok, 'ComfyUI MCP') +
+      pill(h.backends?.comfy, 'ComfyUI MCP') +
+      pill(h.backends?.ltx, 'LTX-Video') +
       pill(h.kokoro?.ok, 'Kokoro MCP') +
       pill(h.ffmpeg, 'ffmpeg') +
       (h.busy ? '<span class="pill busy">render in progress</span>' : '');
     if (h.hint) html += `<div class="hint">${h.hint}</div>`;
+    if (!h.backends?.ltx) {
+      html += '<div class="hint">LTX-Video is not installed yet. Run ' +
+        '<code>npm run setup:ltx</code> to render video diffusion locally ' +
+        '(reference images and videos need it).</div>';
+    }
     $('health').innerHTML = html;
     return h;
   } catch {
@@ -96,6 +112,145 @@ function appendLog(level, message) {
 
 function setProgress(pct) { bar.style.width = Math.min(100, Math.max(0, pct)) + '%'; }
 
+/* ---------------------------------------------------------------------------
+ * Reference uploads
+ *
+ * Files go straight to /api/references, which stores them under the local work
+ * directory. Nothing is proxied anywhere, so a reference-conditioned render
+ * stays entirely local. Each uploaded item carries the strength and start frame
+ * the user chose, which is what LTX-Video consumes as a conditioning item.
+ * ------------------------------------------------------------------------- */
+
+function renderReferences() {
+  const host = $('references');
+  const fragment = document.createDocumentFragment();
+
+  for (const reference of references) {
+    const row = document.createElement('div');
+    row.className = 'ref';
+
+    const tag = document.createElement('span');
+    tag.className = `tag ${reference.kind}`;
+    tag.textContent = reference.kind;
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = reference.filename;
+    name.title = reference.path ?? reference.filename;
+
+    const strengthLabel = document.createElement('span');
+    strengthLabel.className = 'field';
+    strengthLabel.textContent = 'strength';
+    const strength = document.createElement('input');
+    strength.type = 'number';
+    strength.min = '0';
+    strength.max = '1';
+    strength.step = '0.05';
+    strength.value = String(reference.strength);
+    strength.title = 'How strictly the render follows this reference (0-1)';
+    strength.addEventListener('change', () => {
+      reference.strength = Math.min(1, Math.max(0, Number(strength.value) || 0));
+      strength.value = String(reference.strength);
+    });
+
+    const frameLabel = document.createElement('span');
+    frameLabel.className = 'field';
+    frameLabel.textContent = 'frame';
+    const frame = document.createElement('input');
+    frame.type = 'number';
+    frame.min = '0';
+    frame.step = '1';
+    frame.value = String(reference.startFrame);
+    frame.title = 'Frame of the render this reference appears at';
+    frame.disabled = reference.kind !== 'video';
+    frame.addEventListener('change', () => {
+      reference.startFrame = Math.max(0, Math.trunc(Number(frame.value) || 0));
+      frame.value = String(reference.startFrame);
+    });
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'remove';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      references = references.filter((r) => r.id !== reference.id);
+      renderReferences();
+      // Ask the server to drop it too, so abandoned uploads do not pile up.
+      try {
+        await fetch(`/api/references?stamp=${encodeURIComponent(referenceStamp)}`, {
+          method: 'DELETE',
+        });
+      } catch { /* the local list is already correct */ }
+    });
+
+    row.append(tag, name, strengthLabel, strength, frameLabel, frame, remove);
+    fragment.appendChild(row);
+  }
+
+  host.replaceChildren(fragment);
+
+  $('reference-status').textContent = references.length
+    ? `${references.length} reference${references.length === 1 ? '' : 's'} will condition the first scene. ` +
+      'Reference-conditioned rendering uses LTX-Video.'
+    : '';
+}
+
+async function uploadFiles(fileList) {
+  const files = Array.from(fileList ?? []);
+  if (files.length === 0) return;
+
+  for (const file of files) {
+    $('reference-status').textContent = `Uploading ${file.name}…`;
+    try {
+      const response = await fetch(`/api/references?stamp=${encodeURIComponent(referenceStamp)}`, {
+        method: 'POST',
+        headers: { 'X-Filename': encodeURIComponent(file.name) },
+        body: file,
+      });
+      const data = await response.json();
+      if (!data.ok) throw new Error(data.error || response.statusText);
+
+      // The UI-wide strength/frame defaults apply to every upload unless the
+      // user changes them per row.
+      const defaultStrength = Number($('reference-strength').value) || 1;
+      const defaultFrame = Math.max(0, Math.trunc(Number($('reference-start').value) || 0));
+      references.push({
+        id: data.id ?? data.path,
+        path: data.path,
+        filename: data.filename ?? file.name,
+        kind: data.kind,
+        strength: defaultStrength,
+        // A still can only ever condition the first frame.
+        startFrame: data.kind === 'video' ? defaultFrame : 0,
+      });
+    } catch (error) {
+      window.alert(`Could not upload ${file.name}: ${error.message}`);
+    }
+  }
+
+  renderReferences();
+}
+
+$('drop').addEventListener('click', () => $('reference-input').click());
+$('reference-input').addEventListener('change', (event) => {
+  uploadFiles(event.target.files);
+  event.target.value = '';
+});
+['dragenter', 'dragover'].forEach((type) =>
+  $('drop').addEventListener(type, (event) => {
+    event.preventDefault();
+    $('drop').classList.add('over');
+  }),
+);
+['dragleave', 'drop'].forEach((type) =>
+  $('drop').addEventListener(type, (event) => {
+    event.preventDefault();
+    $('drop').classList.remove('over');
+  }),
+);
+$('drop').addEventListener('drop', (event) => uploadFiles(event.dataTransfer?.files));
+
 async function generate() {
   const topic = $('topic').value.trim();
   if (!topic) { $('topic').focus(); return; }
@@ -108,6 +263,20 @@ async function generate() {
   };
   const scenes = Number($('scenes').value) || 0;
   if (scenes > 0) body.scenes = scenes;
+
+  const ltxModel = $('ltx-model').value.trim();
+  if (ltxModel) body.ltxModel = ltxModel;
+
+  // References: the stamp tells the server which uploaded files to load, so the
+  // browser never sends a local filesystem path it does not own.
+  if (references.length > 0) {
+    body.referenceStamp = referenceStamp;
+    body.references = references.map((r) => ({
+      path: r.path,
+      strength: r.strength,
+      startFrame: r.startFrame,
+    }));
+  }
 
   $('generate').disabled = true;
   runCard.classList.remove('hidden');
@@ -125,6 +294,9 @@ async function generate() {
     if (!data.ok) throw new Error(data.error || res.statusText);
 
     appendLog('info', `run ${data.id} queued — streaming progress…`);
+    if (references.length) {
+      appendLog('info', `${references.length} reference(s) conditioning this render`);
+    }
     evtSource?.close();
     evtSource = new EventSource(`/api/runs/${data.id}/events`);
     evtSource.onmessage = (msg) => {
@@ -166,4 +338,5 @@ $('generate').addEventListener('click', generate);
 $('topic').addEventListener('keydown', (e) => { if (e.ctrlKey && e.key === 'Enter') generate(); });
 refreshHealth();
 refreshRuns();
+renderReferences();
 setInterval(refreshRuns, 30000);

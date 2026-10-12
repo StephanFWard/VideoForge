@@ -44,6 +44,8 @@
     "doctor": "node src/cli.js doctor",
     "connect": "node src/cli.js connect",
     "setup:kokoro": "node scripts/setup-kokoro.js",
+    "setup:ltx": "node scripts/setup-ltx.js",
+    "setup:comfyui": "node scripts/setup-comfyui.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
