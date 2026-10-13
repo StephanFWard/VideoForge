@@ -109,10 +109,14 @@ npm run forge -- "continue this clip"  --backend ltx --reference ./shot.mp4 --re
 In the web UI, use the **References** control to upload one or more images or
 videos (png, jpg, jpeg, webp, bmp, tiff / mp4, mov, avi, mkv, webm, m4v). Each
 reference carries a strength (0–1, how strictly it is obeyed) and a start
-frame, and uploads are stored under `work/references/<run>/` — nothing ever
-leaves your machine. The CLI equivalents are `--reference-strength` and
-`--reference-start` (one value applied to every reference, or a
-comma-separated list matched positionally).
+frame. The web UI applies references to every scene by default; choose
+**First scene only** to limit them. Uploaded files are stored under
+`work/references/<run>/` — nothing ever leaves your machine. Reference renders
+use LTX-Video; in `auto` mode VideoForge selects LTX-Video instead of ComfyUI,
+and reports an error rather than silently generating an unconditioned video if
+LTX-Video is unavailable. The CLI equivalents are `--reference-strength`,
+`--reference-start` (one value applied to every reference, or a comma-separated
+list matched positionally), and `--reference-scope first|all` (default: `first`).
 
 ## Configuration
 

@@ -133,6 +133,8 @@
           <input id="reference-strength" type="number" min="0" max="1" step="0.05" value="1" /></div>
         <div><label for="reference-start">First reference frame</label>
           <input id="reference-start" type="number" min="0" step="1" value="0" /></div>
+        <div><label for="reference-scope">Apply references to</label>
+          <select id="reference-scope"><option value="all" selected>Every scene</option><option value="first">First scene only</option></select></div>
       </div>
       <p class="status">The preset list is shown by <code>video-forge models</code>. Frame counts must be
         <code>N × 8 + 1</code> (9, 17, 25…) and sizes divisible by 32; VideoForge snaps them for you.</p>

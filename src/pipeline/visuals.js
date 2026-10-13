@@ -23,6 +23,7 @@ import { randomSeed, resolveMotion, wantsDiffusionMotion, zoompanFilter } from '
 import { alignFrames, resolveLtxResolution } from './ltx.js';
 
 export const BACKENDS = ['auto', 'comfy', 'ltx', 'mock'];
+export const REFERENCE_SCOPES = ['first', 'all'];
 
 export class VisualRenderer {
   /**
@@ -45,6 +46,7 @@ export class VisualRenderer {
       cfg = 7,
       seedBase = '',
       references = [],
+      referenceScope = 'first',
     } = {},
   ) {
     this.config = config;
@@ -57,6 +59,7 @@ export class VisualRenderer {
     this.seedBase = seedBase;
     // Reference media for LTX-Video conditioning: [{path, strength, startFrame}].
     this.references = Array.isArray(references) ? references : [];
+    this.referenceScope = REFERENCE_SCOPES.includes(referenceScope) ? referenceScope : 'first';
     this.backend = null;
     this.comfy = null;
     this.ltx = null;
@@ -78,12 +81,18 @@ export class VisualRenderer {
    * gracefully rather than throwing, because a topic should still render even
    * with no GPU and no diffusion server at all.
    *
-   * Order in `auto` is ComfyUI, then LTX-Video, then mock: ComfyUI is the more
-   * general install and has the workflow ecosystem behind it. Asking for a
-   * backend by name skips the probing and fails loudly instead, which is what
-   * "I explicitly want this renderer" should mean.
+   * Without references, `auto` prefers ComfyUI and falls back to LTX-Video then
+   * mock. Reference-conditioned runs require LTX-Video, so auto selects it
+   * directly rather than producing an unconditioned result.
    */
   async init() {
+    if (this.references.length > 0 && !['auto', 'ltx'].includes(this.config.backend)) {
+      throw new Error(
+        'Reference-conditioned rendering requires the LTX-Video backend. ' +
+          'Choose backend "auto" or "ltx" and run `npm run setup:ltx` if needed.',
+      );
+    }
+
     if (this.config.backend === 'mock') {
       this.backend = 'mock';
       this.reason = 'VIDEO_FORGE_BACKEND=mock';
@@ -91,8 +100,9 @@ export class VisualRenderer {
     }
 
     if (this.config.backend === 'ltx' || this.config.backend === 'auto') {
-      if (await this.initLtx(this.config.backend === 'ltx')) return this;
-      if (this.config.backend === 'ltx') throw this.ltxError;
+      const required = this.config.backend === 'ltx' || this.references.length > 0;
+      if (await this.initLtx(required)) return this;
+      if (required) throw this.ltxError;
     }
 
     if (this.config.backend === 'comfy' || this.config.backend === 'auto') {
@@ -136,8 +146,8 @@ export class VisualRenderer {
   /**
    * Probe the LTX-Video MCP server. Returns true when it can render.
    *
-   * `required` separates "the user asked for LTX" (surface the real error) from
-   * "auto is just checking" (stay quiet - another backend may still work).
+   * `required` separates required LTX renders from auto-mode probing where a
+   * different backend can still render without references.
    */
   async initLtx(required) {
     this.ltx = new LtxClient(this.config, { logger: this.logger });
@@ -159,8 +169,11 @@ export class VisualRenderer {
     const detail = health.detail ?? {};
     const error = detail.error ?? 'unknown error';
     this.ltxUnreachable = `LTX-Video unavailable (${firstLine(error)})`;
+    const requirement = this.references.length > 0
+      ? 'Reference-conditioned rendering requires a ready LTX-Video backend.'
+      : 'VIDEO_FORGE_BACKEND=ltx but LTX-Video is not ready.';
     this.ltxError = new Error(
-      `VIDEO_FORGE_BACKEND=ltx but LTX-Video is not ready.\n${error}\n` +
+      `${requirement}\n${error}\n` +
         'Run `npm run setup:ltx` to install it, then `npm run doctor` to verify.',
     );
 
@@ -300,6 +313,7 @@ export class VisualRenderer {
 
     // 0. LTX-Video: a real video diffusion render, in one shot. -----------------
     if (this.backend === 'ltx') {
+      const sceneReferences = this.referencesForScene(scene, index);
       try {
         const rendered = await this.renderLtxScene({ scene, index, outDir, fps });
         if (rendered?.clip && fs.existsSync(rendered.clip)) {
@@ -317,7 +331,16 @@ export class VisualRenderer {
             renderSeconds: rendered.renderSeconds,
           };
         }
+        if (sceneReferences.length > 0) {
+          throw new Error('LTX-Video did not return a video for a reference-conditioned scene.');
+        }
       } catch (error) {
+        if (sceneReferences.length > 0) {
+          throw new Error(
+            `scene ${index}: reference-conditioned LTX-Video render failed: ${firstLine(error.message)}`,
+            { cause: error },
+          );
+        }
         this.logger?.warn?.(
           `scene ${index}: LTX-Video render failed (${firstLine(error.message)}); ` +
             'falling back to placeholder footage.',
@@ -411,8 +434,8 @@ export class VisualRenderer {
    * then snapped to the model's `N * 8 + 1` lattice.
    *
    * References are attached per scene. A reference the storyboard tagged for this
-   * scene conditions it; the run-wide uploads condition the first scene (so
-   * "here is my product photo" works without editing the storyboard).
+   * scene conditions it; run-wide uploads condition the first or every scene,
+   * according to the selected reference scope.
    *
    * @returns {Promise<{clip: string, still: string|null, seed: number|null, model: string, references: object[], renderSeconds: number}>}
    */
@@ -493,8 +516,8 @@ export class VisualRenderer {
    * Which references condition a given scene.
    *
    * A scene's own `reference`/`references` win outright. Otherwise the run-wide
-   * uploads condition the first scene only - conditioning every scene with the
-   * same picture would fight the per-scene prompts and flatten the whole video.
+   * uploads condition the first scene, or every scene when `referenceScope` is
+   * `all`.
    */
   referencesForScene(scene, index) {
     const own = Array.isArray(scene?.references)
@@ -503,7 +526,7 @@ export class VisualRenderer {
         ? [scene.reference]
         : [];
     if (own.length > 0) return own;
-    return index === 1 ? this.references : [];
+    return this.referenceScope === 'all' || index === 1 ? this.references : [];
   }
 
   /** Offline placeholder footage - the last rung of the degradation ladder. */

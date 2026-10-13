@@ -32,6 +32,7 @@ import { ComfyClient } from './mcp/comfy.js';
 import { LtxClient } from './mcp/ltx.js';
 import { saveReferenceUpload, clearReferences, resolveReferences } from './pipeline/references.js';
 import { isReferenceFile, referenceKind } from './pipeline/ltx.js';
+import { REFERENCE_SCOPES } from './pipeline/visuals.js';
 
 /** Uploaded reference media is capped per file, so a browser cannot exhaust RAM. */
 const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
@@ -377,6 +378,14 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
       });
     }
 
+    const referenceScope = body.referenceScope ?? 'first';
+    if (!REFERENCE_SCOPES.includes(referenceScope)) {
+      return res.status(400).json({
+        ok: false,
+        error: `Unknown reference scope "${referenceScope}". Use ${REFERENCE_SCOPES.join(' | ')}.`,
+      });
+    }
+
     // Reference media. Two ways in: a `referenceStamp` naming files already
     // uploaded to /api/references, or explicit `references` (paths, for a
     // scripted client). Either way the list is validated here, so a bad upload
@@ -384,7 +393,18 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
     let references = [];
     try {
       const raw = body.referenceStamp
-        ? listReferences(config, String(body.referenceStamp))
+        ? listReferences(config, String(body.referenceStamp)).map((uploaded) => {
+            const requested = Array.isArray(body.references)
+              ? body.references.find((reference) => reference?.path === uploaded.path)
+              : null;
+            return requested
+              ? {
+                  ...uploaded,
+                  strength: requested.strength ?? uploaded.strength,
+                  startFrame: requested.startFrame ?? uploaded.startFrame,
+                }
+              : uploaded;
+          })
         : body.references ?? [];
       references = resolveReferences(raw, { config });
     } catch (error) {
@@ -442,6 +462,7 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
         if (event?.type) registry.publish(run, event);
       },
       references: references.references ?? [],
+      referenceScope,
     })
       .then((result) => {
         run.status = 'done';
@@ -627,4 +648,3 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.join(ROOT, 'src', 
 }
 
 export default startServer;
-

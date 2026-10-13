@@ -58,6 +58,7 @@ LTX-VIDEO OPTIONS (local video diffusion)
       --reference <path>    Condition on an image or video. Repeatable.
       --reference-strength <n>  How strictly references are obeyed, 0..1 (default: 1)
       --reference-start <n>     Frame each reference appears at (default: 0)
+      --reference-scope <s>     first | all (default: first)
 
 EXAMPLES
   video-forge forge "how to brew better coffee" --scenes 5
@@ -214,6 +215,9 @@ async function cmdForge(flags) {
     planOnly: Boolean(flags['plan-only']),
     silent: Boolean(flags.json),
     references: referencesFromFlags(flags),
+    referenceScope: flags['reference-scope'] && flags['reference-scope'] !== true
+      ? String(flags['reference-scope'])
+      : 'first',
   });
 
   if (flags['plan-only']) {

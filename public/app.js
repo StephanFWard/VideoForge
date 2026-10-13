@@ -191,7 +191,8 @@ function renderReferences() {
   host.replaceChildren(fragment);
 
   $('reference-status').textContent = references.length
-    ? `${references.length} reference${references.length === 1 ? '' : 's'} will condition the first scene. ` +
+    ? `${references.length} reference${references.length === 1 ? '' : 's'} will condition ` +
+      `${$('reference-scope').value === 'all' ? 'every scene' : 'the first scene'}. ` +
       'Reference-conditioned rendering uses LTX-Video.'
     : '';
 }
@@ -250,6 +251,7 @@ $('reference-input').addEventListener('change', (event) => {
   }),
 );
 $('drop').addEventListener('drop', (event) => uploadFiles(event.dataTransfer?.files));
+$('reference-scope').addEventListener('change', renderReferences);
 
 async function generate() {
   const topic = $('topic').value.trim();
@@ -271,6 +273,7 @@ async function generate() {
   // browser never sends a local filesystem path it does not own.
   if (references.length > 0) {
     body.referenceStamp = referenceStamp;
+    body.referenceScope = $('reference-scope').value;
     body.references = references.map((r) => ({
       path: r.path,
       strength: r.strength,

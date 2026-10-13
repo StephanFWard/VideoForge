@@ -17,7 +17,7 @@ import { createLogger } from '../util/log.js';
 import { ensureDir, runStamp, slugify, writeJson } from '../util/fs.js';
 import { ffmpegAvailable, placeholderStill } from '../util/ffmpeg.js';
 import { loadStoryboard } from './planner.js';
-import { VisualRenderer } from './visuals.js';
+import { REFERENCE_SCOPES, VisualRenderer } from './visuals.js';
 import { resolveReferences, referenceSetId } from './references.js';
 import { KokoroNarration } from '../mcp/kokoro.js';
 import { narrateScenes } from './audio.js';
@@ -39,6 +39,7 @@ import { buildTimeline } from './timeline.js';
  * @param {boolean}  [req.silent]
  * @param {Array<object>} [req.references] uploaded images/videos for LTX-Video
  *                                        conditioning: [{path, strength, startFrame}]
+ * @param {'first'|'all'} [req.referenceScope] scenes conditioned by run-wide references
  */
 export async function forge({
   topic,
@@ -51,10 +52,17 @@ export async function forge({
   planOnly = false,
   silent = false,
   references = [],
+  referenceScope = 'first',
 } = {}) {
   const started = Date.now();
   const log = logger ?? createLogger({ silent, onEvent });
   const config = loadConfig(configOverrides);
+
+  if (!REFERENCE_SCOPES.includes(referenceScope)) {
+    throw new Error(
+      `Unknown reference scope "${referenceScope}". Use ${REFERENCE_SCOPES.join(' | ')}.`,
+    );
+  }
 
   if (!(await ffmpegAvailable(config.ffmpeg, config.ffprobe))) {
     throw new Error(
@@ -135,6 +143,7 @@ export async function forge({
     // Reference media (LTX-Video conditioning). Validated here, before anything
     // expensive runs, so a bad upload fails in the planning stage.
     references: resolvedReferences.references,
+    referenceScope,
   });
 
   const segmentResults = [];
