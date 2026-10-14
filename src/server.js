@@ -245,6 +245,10 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
         'Run `npm run setup:ltx`, or switch the backend to auto.';
     }
     health.backends = { comfy: health.comfy.ok, ltx: Boolean(health.ltx?.ok) };
+    health.backends.matting =
+      fs.existsSync(config.matting.python) &&
+      fs.existsSync(config.matting.script) &&
+      fs.existsSync(config.matting.imageScript);
     health.maxReferences = config.maxReferenceUploads;
 
     health.kokoro = {
@@ -385,6 +389,30 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
         error: `Unknown reference scope "${referenceScope}". Use ${REFERENCE_SCOPES.join(' | ')}.`,
       });
     }
+    const editVideo = body.editVideo === true;
+    const backgroundTheme = typeof body.backgroundTheme === 'string' ? body.backgroundTheme.trim() : '';
+    const foregroundTheme = typeof body.foregroundTheme === 'string' ? body.foregroundTheme.trim() : '';
+    if (
+      (body.backgroundTheme !== undefined && typeof body.backgroundTheme !== 'string') ||
+      (body.foregroundTheme !== undefined && typeof body.foregroundTheme !== 'string')
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: '"backgroundTheme" and "foregroundTheme" must be strings.',
+      });
+    }
+    if (backgroundTheme.length > 2000 || foregroundTheme.length > 2000) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Background and foreground themes must be 2,000 characters or fewer.',
+      });
+    }
+    if (editVideo && !backgroundTheme && !foregroundTheme && !topic) {
+      return res.status(400).json({
+        ok: false,
+        error: 'An uploaded-video edit needs a background or foreground theme.',
+      });
+    }
 
     // Reference media. Two ways in: a `referenceStamp` naming files already
     // uploaded to /api/references, or explicit `references` (paths, for a
@@ -463,6 +491,9 @@ export async function startServer({ port = 4321, config: configOverrides = {} } 
       },
       references: references.references ?? [],
       referenceScope,
+      editVideo,
+      backgroundTheme,
+      foregroundTheme,
     })
       .then((result) => {
         run.status = 'done';

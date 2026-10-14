@@ -20,7 +20,7 @@ import { LtxClient } from '../mcp/ltx.js';
 import { placeholderShot, probe, stillToVideo, extractFrame } from '../util/ffmpeg.js';
 import { cacheKey, readCacheEntry, writeCacheEntry } from '../util/cache.js';
 import { randomSeed, resolveMotion, wantsDiffusionMotion, zoompanFilter } from './motion.js';
-import { alignFrames, resolveLtxResolution } from './ltx.js';
+import { alignFrames, MAX_FRAMES, resolveLtxResolution } from './ltx.js';
 
 export const BACKENDS = ['auto', 'comfy', 'ltx', 'mock'];
 export const REFERENCE_SCOPES = ['first', 'all'];
@@ -47,6 +47,8 @@ export class VisualRenderer {
       seedBase = '',
       references = [],
       referenceScope = 'first',
+      inputVideoPath = null,
+      inputVideoInfo = null,
     } = {},
   ) {
     this.config = config;
@@ -60,6 +62,9 @@ export class VisualRenderer {
     // Reference media for LTX-Video conditioning: [{path, strength, startFrame}].
     this.references = Array.isArray(references) ? references : [];
     this.referenceScope = REFERENCE_SCOPES.includes(referenceScope) ? referenceScope : 'first';
+    this.inputVideoPath = inputVideoPath;
+    this.inputVideoInfo = inputVideoInfo;
+    this.ltxDevice = null;
     this.backend = null;
     this.comfy = null;
     this.ltx = null;
@@ -86,7 +91,8 @@ export class VisualRenderer {
    * directly rather than producing an unconditioned result.
    */
   async init() {
-    if (this.references.length > 0 && !['auto', 'ltx'].includes(this.config.backend)) {
+    const requiresLtx = this.references.length > 0 || Boolean(this.inputVideoPath);
+    if (requiresLtx && !['auto', 'ltx'].includes(this.config.backend)) {
       throw new Error(
         'Reference-conditioned rendering requires the LTX-Video backend. ' +
           'Choose backend "auto" or "ltx" and run `npm run setup:ltx` if needed.',
@@ -100,7 +106,7 @@ export class VisualRenderer {
     }
 
     if (this.config.backend === 'ltx' || this.config.backend === 'auto') {
-      const required = this.config.backend === 'ltx' || this.references.length > 0;
+      const required = this.config.backend === 'ltx' || requiresLtx;
       if (await this.initLtx(required)) return this;
       if (required) throw this.ltxError;
     }
@@ -156,6 +162,7 @@ export class VisualRenderer {
     if (health.ok) {
       this.backend = 'ltx';
       const detail = health.detail ?? {};
+      this.ltxDevice = detail.device ?? null;
       this.reason =
         `LTX-Video ${detail.version ?? '?'} on ${detail.device ?? '?'}` +
         (detail.vramGb ? ` (${detail.vramGb} GB VRAM)` : '');
@@ -169,7 +176,7 @@ export class VisualRenderer {
     const detail = health.detail ?? {};
     const error = detail.error ?? 'unknown error';
     this.ltxUnreachable = `LTX-Video unavailable (${firstLine(error)})`;
-    const requirement = this.references.length > 0
+    const requirement = this.references.length > 0 || this.inputVideoPath
       ? 'Reference-conditioned rendering requires a ready LTX-Video backend.'
       : 'VIDEO_FORGE_BACKEND=ltx but LTX-Video is not ready.';
     this.ltxError = new Error(
@@ -313,7 +320,8 @@ export class VisualRenderer {
 
     // 0. LTX-Video: a real video diffusion render, in one shot. -----------------
     if (this.backend === 'ltx') {
-      const sceneReferences = this.referencesForScene(scene, index);
+      const requiresConditionedRender =
+        this.referencesForScene(scene, index).length > 0 || Boolean(this.inputVideoPath);
       try {
         const rendered = await this.renderLtxScene({ scene, index, outDir, fps });
         if (rendered?.clip && fs.existsSync(rendered.clip)) {
@@ -331,13 +339,13 @@ export class VisualRenderer {
             renderSeconds: rendered.renderSeconds,
           };
         }
-        if (sceneReferences.length > 0) {
-          throw new Error('LTX-Video did not return a video for a reference-conditioned scene.');
+        if (requiresConditionedRender) {
+          throw new Error('LTX-Video did not return a video for a conditioned scene.');
         }
       } catch (error) {
-        if (sceneReferences.length > 0) {
+        if (requiresConditionedRender) {
           throw new Error(
-            `scene ${index}: reference-conditioned LTX-Video render failed: ${firstLine(error.message)}`,
+            `scene ${index}: conditioned LTX-Video render failed: ${firstLine(error.message)}`,
             { cause: error },
           );
         }
@@ -442,14 +450,37 @@ export class VisualRenderer {
   async renderLtxScene({ scene, index, outDir, fps }) {
     const seed = this.seedFor(scene, index);
     const clipSeconds = Math.max(1, Number(scene.seconds) || 5);
-    const numFrames = alignFrames(clipSeconds * fps);
+    const requestedFrames = this.inputVideoPath && this.inputVideoInfo
+      ? Math.round(this.inputVideoInfo.duration * fps)
+      : clipSeconds * fps;
+    if (requestedFrames > MAX_FRAMES) {
+      throw new Error(
+        `The source video is longer than LTX-Video's ${MAX_FRAMES}-frame limit ` +
+          `(${(MAX_FRAMES / fps).toFixed(1)} seconds at ${fps} fps).`,
+      );
+    }
+    const numFrames = alignFrames(requestedFrames);
 
-    // Resolution: what the model should actually draw. 'bin' mode snaps to a
-    // training aspect ratio, which produces noticeably better pictures off-spec.
+    let maxWidth = this.config.render.width;
+    let maxHeight = this.config.render.height;
+    if (this.ltxDevice === 'cpu') {
+      const scale = Math.min(1, 512 / maxWidth, 512 / maxHeight);
+      maxWidth = Math.max(32, Math.floor((maxWidth * scale) / 32) * 32);
+      maxHeight = Math.max(32, Math.floor((maxHeight * scale) / 32) * 32);
+    }
+    if (this.inputVideoInfo?.width && this.inputVideoInfo?.height) {
+      const scale = Math.min(
+        maxWidth / this.inputVideoInfo.width,
+        maxHeight / this.inputVideoInfo.height,
+      );
+      maxWidth = Math.max(32, Math.round((this.inputVideoInfo.width * scale) / 32) * 32);
+      maxHeight = Math.max(32, Math.round((this.inputVideoInfo.height * scale) / 32) * 32);
+    }
+
     const target = resolveLtxResolution({
-      width: this.config.render.width,
-      height: this.config.render.height,
-      mode: this.config.ltx.resolutionMode,
+      width: maxWidth,
+      height: maxHeight,
+      mode: this.ltxDevice === 'cpu' ? 'exact' : this.config.ltx.resolutionMode,
     });
 
     const sceneReferences = this.referencesForScene(scene, index);
@@ -476,6 +507,7 @@ export class VisualRenderer {
       enhancePrompt: this.config.ltx.enhancePrompt,
       offloadToCpu: this.config.ltx.offloadToCpu,
       imageCondNoiseScale: this.config.ltx.imageCondNoiseScale,
+      inputMediaPath: this.inputVideoPath ?? undefined,
       references: sceneReferences,
     });
 
@@ -526,7 +558,10 @@ export class VisualRenderer {
         ? [scene.reference]
         : [];
     if (own.length > 0) return own;
-    return this.referenceScope === 'all' || index === 1 ? this.references : [];
+    const selected = this.referenceScope === 'all' || index === 1 ? this.references : [];
+    return this.inputVideoPath
+      ? selected.filter((reference) => reference.path !== this.inputVideoPath)
+      : selected;
   }
 
   /** Offline placeholder footage - the last rung of the degradation ladder. */

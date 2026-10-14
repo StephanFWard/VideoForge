@@ -157,6 +157,12 @@ export function normalizeStoryboard(raw, { config, defaults = {} } = {}) {
       imagePrompt: imagePrompt || narration,
       videoPrompt: videoPrompt || imagePrompt || narration,
       seconds,
+      outputSeconds: clamp(
+        scene.output_seconds ?? scene.outputSeconds,
+        LIMITS.minSceneSeconds,
+        LIMITS.maxSceneSeconds,
+        null,
+      ),
       motion: motionValid ? motion : 'auto',
       seed: Number.isFinite(Number(scene.seed)) ? Number(scene.seed) : null,
       transition: transitionValid ? rawTransition : 'none',

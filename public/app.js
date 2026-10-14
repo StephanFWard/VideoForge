@@ -20,14 +20,19 @@ async function refreshHealth() {
     let html =
       pill(h.backends?.comfy, 'ComfyUI MCP') +
       pill(h.backends?.ltx, 'LTX-Video') +
+      pill(h.backends?.matting, 'Foreground matting') +
       pill(h.kokoro?.ok, 'Kokoro MCP') +
       pill(h.ffmpeg, 'ffmpeg') +
       (h.busy ? '<span class="pill busy">render in progress</span>' : '');
     if (h.hint) html += `<div class="hint">${h.hint}</div>`;
-    if (!h.backends?.ltx) {
+    if (!h.backends?.ltx && $('video-operation').value !== 'edit') {
       html += '<div class="hint">LTX-Video is not installed yet. Run ' +
         '<code>npm run setup:ltx</code> to render video diffusion locally ' +
         '(reference images and videos need it).</div>';
+    }
+    if (!h.backends?.matting) {
+      html += '<div class="hint">Layered video edits need the local CPU foreground-matting runtime. ' +
+        'Run <code>npm run setup:matting</code> once to enable it.</div>';
     }
     $('health').innerHTML = html;
     return h;
@@ -191,9 +196,11 @@ function renderReferences() {
   host.replaceChildren(fragment);
 
   $('reference-status').textContent = references.length
-    ? `${references.length} reference${references.length === 1 ? '' : 's'} will condition ` +
-      `${$('reference-scope').value === 'all' ? 'every scene' : 'the first scene'}. ` +
-      'Reference-conditioned rendering uses LTX-Video.'
+    ? ($('video-operation').value === 'edit'
+      ? 'The uploaded video will be segmented locally and composited with the requested themes.'
+      : `${references.length} reference${references.length === 1 ? '' : 's'} will condition ` +
+        `${$('reference-scope').value === 'all' ? 'every scene' : 'the first scene'}. ` +
+        'Reference-conditioned rendering uses LTX-Video.')
     : '';
 }
 
@@ -252,6 +259,15 @@ $('reference-input').addEventListener('change', (event) => {
 );
 $('drop').addEventListener('drop', (event) => uploadFiles(event.dataTransfer?.files));
 $('reference-scope').addEventListener('change', renderReferences);
+$('video-operation').addEventListener('change', () => {
+  const editing = $('video-operation').value === 'edit';
+  $('edit-themes').classList.toggle('hidden', !editing);
+  $('video-operation-help').textContent = editing
+    ? 'Edit mode detects the moving foreground locally, generates the selected theme layers, and composites them while retaining the source video motion and duration.'
+    : 'Edit mode segments the moving foreground locally, composites generated theme imagery behind/in place of it, and replaces source audio with generated narration.';
+  renderReferences();
+  refreshHealth();
+});
 
 async function generate() {
   const topic = $('topic').value.trim();
@@ -280,6 +296,17 @@ async function generate() {
       startFrame: r.startFrame,
     }));
   }
+  body.editVideo = $('video-operation').value === 'edit';
+  if (body.editVideo) {
+    body.backgroundTheme = $('background-theme').value.trim();
+    body.foregroundTheme = $('foreground-theme').value.trim();
+  }
+  if (body.editVideo && references.filter((reference) => reference.kind === 'video').length !== 1) {
+    runCard.classList.remove('hidden');
+    logEl.replaceChildren();
+    appendLog('error', 'Edit mode needs exactly one uploaded video. Remove extra videos or switch to reference mode.');
+    return;
+  }
 
   $('generate').disabled = true;
   runCard.classList.remove('hidden');
@@ -297,7 +324,9 @@ async function generate() {
     if (!data.ok) throw new Error(data.error || res.statusText);
 
     appendLog('info', `run ${data.id} queued — streaming progress…`);
-    if (references.length) {
+    if (body.editVideo) {
+      appendLog('info', 'Segmenting and compositing video themes locally; ComfyUI generates theme artwork');
+    } else if (references.length) {
       appendLog('info', `${references.length} reference(s) conditioning this render`);
     }
     evtSource?.close();

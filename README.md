@@ -5,16 +5,14 @@
 
 **Turn any topic into a finished narrated video — entirely on your own machine.**
 
-VideoForge is a local AI video generator. Give it a topic (or a hand-written
-storyboard), and it writes the script, generates every visual through the
-**ComfyUI MCP** or **LTX-Video MCP** server, narrates it through a **Kokoro TTS
-MCP** server, and cuts everything together with **ffmpeg** — up to a 4K delivery
-file. No API keys, no cloud, no per-render cost.
+VideoForge is a local AI video generator and editor. Give it a topic (or a
+hand-written storyboard), and it writes the script, generates visuals through
+the **ComfyUI MCP** or **LTX-Video MCP** server, narrates through **Kokoro TTS**,
+and assembles everything with **ffmpeg** — up to a 4K delivery file.
 
 ```
-topic ──▶ planner ──▶ ComfyUI / LTX-Video MCP ──▶ Kokoro MCP (narration) ──▶ ffmpeg ──▶ video
-                           ▲
-              reference images / videos (optional)
+topic ──▶ planner ──▶ visuals ──▶ narration ──▶ ffmpeg ──▶ video
+          source clip ──▶ local foreground matte ──▶ theme-layer composite ──┘
 ```
 
 ## Highlights
@@ -52,6 +50,7 @@ topic ──▶ planner ──▶ ComfyUI / LTX-Video MCP ──▶ Kokoro MCP (
 | Python 3.11 | for the Kokoro MCP server (uv-managed venv is created for you) |
 | [uv](https://docs.astral.sh/uv/) | installs the Kokoro Python deps           |
 | ComfyUI     | any local instance, or `npm run setup:comfyui`                 |
+| Foreground matting | optional — `npm run setup:matting` for layered video edits |
 | LTX-Video   | optional — `npm run setup:ltx` for local video diffusion       |
 
 ## Quick start
@@ -60,6 +59,7 @@ topic ──▶ planner ──▶ ComfyUI / LTX-Video MCP ──▶ Kokoro MCP (
 npm install              # node deps (express, MCP SDK)
 npm run setup:kokoro     # creates .venv + installs kokoro & the MCP SDK
 npm run setup:ltx        # creates .venv-ltx + LTX-Video (local video diffusion)
+npm run setup:matting    # creates .venv-matting + CPU foreground segmentation
 npm run setup:comfyui    # clones ComfyUI into vendor/ + venv + starter checkpoint
 
 # …or start an existing ComfyUI yourself (example: CPU mode, port 8188)
@@ -118,6 +118,43 @@ LTX-Video is unavailable. The CLI equivalents are `--reference-strength`,
 `--reference-start` (one value applied to every reference, or a comma-separated
 list matched positionally), and `--reference-scope first|all` (default: `first`).
 
+To edit an uploaded video rather than create a montage, choose **Edit the
+uploaded video** and upload exactly one video. Enter a background theme, a
+foreground theme, or both. If both theme fields are blank, the main request is
+used as the background theme. The workflow preprocesses the source to a
+maximum 512-pixel working side, runs the `isnet-general-use` foreground matte
+model locally on every frame, generates the requested still theme artwork with
+ComfyUI, then composites the layers with ffmpeg. It preserves source timing,
+camera movement and subject silhouette, supports clips longer than LTX-Video's
+257-frame limit, and replaces the original audio with generated narration.
+Leave the foreground field blank to keep the original subject.
+
+Install the separate, CPU-only matting environment once with
+`npm run setup:matting`; the saliency model is downloaded the first time an edit
+runs. ComfyUI must also be reachable to generate theme images. The uploaded
+video is processed locally and is not sent to ComfyUI; only the theme prompts
+are sent to the configured ComfyUI MCP server.
+
+A foreground theme is a generated still fitted to the source subject's
+automatically detected bounding box and masked by its moving silhouette. This
+preserves the subject's outline and motion, but is not pose-aware redraw or
+per-pixel identity preservation; unusual camera cuts, occlusions, multiple
+subjects, or complex hair/transparency can produce matte artifacts. Background
+replacement is the most reliable mode. Edit duration is not capped to the LTX
+model's short-clip limit, though segmentation and final encoding time grow with
+the source length.
+
+```bash
+npm run forge -- "A quick golf-course introduction" --edit-video \
+  --reference ./desktop-recording.mp4 \
+  --background-theme "a manicured golf course on a sunny morning"
+
+npm run forge -- "A beach makeover" --edit-video \
+  --reference ./clip.mp4 \
+  --background-theme "a tropical beach at sunset" \
+  --foreground-theme "a surfer in a dark wetsuit, full body"
+```
+
 ## Configuration
 
 Everything is configured through environment variables (or a `.env` file — see
@@ -133,6 +170,7 @@ Everything is configured through environment variables (or a `.env` file — see
 | `KOKORO_MCP_COMMAND`  | bundled venv python      | custom Kokoro MCP server command |
 | `COMFYUI_MCP_COMMAND` | `npx comfyui-mcp@latest` | custom ComfyUI MCP server        |
 | `LTX_MCP_COMMAND`     | bundled .venv-ltx python | custom LTX-Video MCP server      |
+| `VIDEO_FORGE_MATTING_PYTHON` | bundled .venv-matting python | local foreground-matting runtime |
 | `LTX_MODEL`           | `ltxv-2b-0.9.8-distilled.yaml` | LTX-Video pipeline preset  |
 | `VIDEO_FORGE_MAX_REFERENCES` | `8`             | cap on uploaded references       |
 | `VIDEO_FORGE_OUT`     | `./output`               | finished videos                  |

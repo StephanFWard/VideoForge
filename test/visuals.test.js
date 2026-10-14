@@ -65,6 +65,57 @@ test('reference-conditioned LTX failures do not produce placeholder footage', as
 
   await assert.rejects(
     renderer.renderScene({ scene: {}, index: 1, outDir: '.', fps: 30 }),
-    /reference-conditioned LTX-Video render failed: model failed/,
+    /conditioned LTX-Video render failed: model failed/,
   );
+});
+
+test('video-edit LTX failures do not produce placeholder footage', async () => {
+  const renderer = new VisualRenderer(
+    { render: { width: 640, height: 360 } },
+    { inputVideoPath: 'source.mp4' },
+  );
+  renderer.backend = 'ltx';
+  renderer.renderLtxScene = async () => {
+    throw new Error('model failed');
+  };
+  renderer.renderPlaceholder = async () => {
+    assert.fail('a failed source-video edit must not return a placeholder');
+  };
+
+  await assert.rejects(
+    renderer.renderScene({ scene: {}, index: 1, outDir: '.', fps: 30 }),
+    /conditioned LTX-Video render failed: model failed/,
+  );
+});
+
+test('CPU LTX renders are capped to a memory-conscious working resolution', async () => {
+  const renderer = new VisualRenderer({
+    render: { width: 1280, height: 720 },
+    ltx: { resolutionMode: 'exact' },
+  });
+  renderer.ltxDevice = 'cpu';
+  renderer.inputVideoPath = 'source.mp4';
+  renderer.inputVideoInfo = { width: 1080, height: 1920, duration: 5 };
+  let request;
+  renderer.ltx = {
+    generate: async (args) => {
+      request = args;
+      return { path: 'not-used.mp4' };
+    },
+  };
+  renderer.config = {
+    ...renderer.config,
+    ltx: { resolutionMode: 'exact', model: 'model', offloadToCpu: false },
+    fps: 30,
+  };
+
+  await assert.rejects(
+    renderer.renderLtxScene({ scene: { seconds: 5 }, index: 1, outDir: '.', fps: 30 }),
+    /reported not-used\.mp4 but no file exists/,
+  );
+  assert.equal(request.inputMediaPath, 'source.mp4');
+  assert.ok(request.width <= 512);
+  assert.ok(request.height <= 512);
+  assert.ok(request.height > request.width);
+  assert.equal(request.numFrames, 153);
 });

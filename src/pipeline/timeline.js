@@ -79,7 +79,9 @@ export function buildTimeline({
   const scenes = storyboard.scenes.map((scene, index) => {
     const spoken = narration.find((entry) => Number(entry?.scene) === index + 1)?.duration;
     const fallback = Number(scene.seconds) > 0 ? Number(scene.seconds) : LIMITS.defaultSceneSeconds;
-    const seconds = (Number.isFinite(Number(spoken)) && Number(spoken) > 0 ? Number(spoken) : fallback) + pad;
+    const seconds = Number(scene.outputSeconds) > 0
+      ? Number(scene.outputSeconds)
+      : (Number.isFinite(Number(spoken)) && Number(spoken) > 0 ? Number(spoken) : fallback) + pad;
     const durationInFrames = secondsToFrames(seconds, fpsOut);
 
     const requested = isTransition(scene.transition) ? scene.transition : 'none';
@@ -154,4 +156,3 @@ export function isCrossfadeBoundary(timeline, index) {
 }
 
 export default { buildTimeline, crossfades, secondsToFrames, framesToSeconds, isCrossfadeBoundary };
-

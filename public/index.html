@@ -95,7 +95,7 @@
 <body>
 <header>
   <h1>Video<span>Forge</span></h1>
-  <p>Topic in, finished video out — LTX-Video for local video diffusion, ComfyUI MCP for visuals, Kokoro MCP for narration, ffmpeg for the final cut.</p>
+  <p>Generate or edit videos with ComfyUI visuals, local foreground matting, Kokoro narration, and ffmpeg compositing.</p>
 </header>
 <main>
   <section class="card">
@@ -123,6 +123,22 @@
       accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff,video/mp4,video/quicktime,video/webm,video/x-msvideo,video/x-matroska" />
     <div class="refs" id="references"></div>
     <div class="status" id="reference-status"></div>
+    <div><label for="video-operation">Uploaded video</label>
+      <select id="video-operation">
+        <option value="reference" selected>Use as a reference for generated scenes</option>
+        <option value="edit">Edit the uploaded video</option>
+      </select>
+      <p class="status" id="video-operation-help">Edit mode segments the moving foreground locally, composites generated theme imagery behind/in place of it, and replaces source audio with generated narration.</p>
+      <div id="edit-themes" class="hidden">
+        <div class="row">
+          <div><label for="background-theme">Background theme</label>
+            <input id="background-theme" type="text" maxlength="2000" placeholder="e.g. a sunny tropical beach, ocean horizon" /></div>
+          <div><label for="foreground-theme">Foreground theme (optional)</label>
+            <input id="foreground-theme" type="text" maxlength="2000" placeholder="e.g. golf clothing and equipment" /></div>
+        </div>
+        <p class="status">Leave foreground blank to keep the original subject. If both theme fields are blank, the main request is used as the background theme. Theme artwork requires ComfyUI; the uploaded video is segmented and composited locally. Foreground replacement is experimental: one generated subject image is fitted to the moving silhouette, not redrawn to match each pose.</p>
+      </div>
+    </div>
 
     <details class="settings">
       <summary>LTX-Video settings</summary>

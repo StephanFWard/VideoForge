@@ -208,6 +208,47 @@ export function planFromTopic(topic, opts = {}) {
   };
 }
 
+/**
+ * Build one continuous scene for an edit instruction applied to source video.
+ *
+ * @param {string} topic The user's requested edit.
+ * @param {object} [opts] { seconds, defaults }
+ */
+export function planVideoEdit(topic, { seconds, defaults = {} } = {}) {
+  const instruction = String(topic ?? '').trim();
+  if (!instruction) throw new Error('A video edit instruction is required.');
+
+  const prompt =
+    `Edit the provided source video: ${instruction}. ` +
+    'Preserve the original subject, action, camera movement, framing, and timing. ' +
+    'Keep the result temporally consistent from frame to frame.';
+  const { storyboard, warnings } = normalizeStoryboard(
+    {
+      topic: instruction,
+      title: titleFromTopic(instruction),
+      description: `A continuous source-video edit: ${instruction}`,
+      look: '',
+      scenes: [{
+        id: 1,
+        title: 'Edited video',
+        narration: instruction,
+        image_prompt: prompt,
+        video_prompt: prompt,
+        seconds,
+        output_seconds: seconds,
+        motion: 'video',
+      }],
+    },
+    { defaults },
+  );
+  if (Number.isFinite(Number(seconds)) && Number(seconds) > 0) {
+    storyboard.scenes[0].seconds = Number(seconds);
+    storyboard.scenes[0].outputSeconds = Number(seconds);
+    storyboard.estimatedSeconds = Math.round(Number(seconds));
+  }
+  return { storyboard, warnings };
+}
+
 /** "realistic 4k fitness model workout" -> "Realistic 4K Fitness Model Workout" */
 export function titleFromTopic(topic) {
   return String(topic)

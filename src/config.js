@@ -95,6 +95,14 @@ function ltxPythonBin() {
   return path.join(ROOT, ...rel);
 }
 
+function mattingPythonBin() {
+  const rel =
+    process.platform === 'win32'
+      ? ['.venv-matting', 'Scripts', 'python.exe']
+      : ['.venv-matting', 'bin', 'python'];
+  return path.join(ROOT, ...rel);
+}
+
 function splitArgs(value, fallback) {
   if (!value) return fallback;
   return value.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((a) => a.replace(/^"|"$/g, '')) ?? fallback;
@@ -242,6 +250,11 @@ export function loadConfig(overrides = {}) {
     // LTX-Video (local video diffusion). Everything here maps onto the model's
     // own knobs; see src/pipeline/ltx.js for the shape rules they must obey.
     ltxMcp,
+    matting: {
+      python: overrides.mattingPython ?? env('VIDEO_FORGE_MATTING_PYTHON', mattingPythonBin()),
+      script: path.join(ROOT, 'mcp-servers', 'video-edit', 'segment_matte.py'),
+      imageScript: path.join(ROOT, 'mcp-servers', 'video-edit', 'remove_image_background.py'),
+    },
     ltx: {
       // The pipeline preset (configs/*.yaml in the LTX MCP server).
       model: overrides.ltxModel ?? env('LTX_MODEL', DEFAULT_LTX_MODEL),

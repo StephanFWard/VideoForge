@@ -2,7 +2,7 @@
   "name": "video-forge",
   "version": "1.0.0",
   "private": false,
-  "description": "Turn any topic into a finished video by orchestrating the ComfyUI MCP for visuals and a Kokoro MCP for narration.",
+  "description": "Create and edit narrated videos with ComfyUI, local foreground matting, Kokoro and ffmpeg.",
   "keywords": [
     "ai-video",
     "comfyui",
@@ -45,6 +45,7 @@
     "connect": "node src/cli.js connect",
     "setup:kokoro": "node scripts/setup-kokoro.js",
     "setup:ltx": "node scripts/setup-ltx.js",
+    "setup:matting": "node scripts/setup-matting.js",
     "setup:comfyui": "node scripts/setup-comfyui.js",
     "test": "node --test test/*.test.js"
   },

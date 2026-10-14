@@ -36,6 +36,8 @@ export class McpConnection {
   async connect() {
     if (this.client) return this;
 
+    this.stderr = '';
+    this.lastError = null;
     const transport = new StdioClientTransport({
       command: this.spec.command,
       args: this.spec.args ?? [],
@@ -52,7 +54,6 @@ export class McpConnection {
     transport.stderr?.on('data', (chunk) => {
       this.stderr = (this.stderr + chunk.toString()).slice(-MAX_STDERR);
     });
-
     const client = new Client(
       { name: 'video-forge', version: '1.0.0' },
       { capabilities: {} },
@@ -62,13 +63,19 @@ export class McpConnection {
       await client.connect(transport);
     } catch (error) {
       const detail = this.stderr.trim();
-      this.lastError = error;
+      this.lastError ??= error;
       throw new Error(
         `Could not start the "${this.name}" MCP server ` +
           `(${this.spec.command} ${(this.spec.args ?? []).join(' ')}): ${error.message}` +
           (detail ? `\n--- server stderr ---\n${detail}` : ''),
       );
     }
+
+    const onTransportError = transport.onerror;
+    transport.onerror = (error) => {
+      this.lastError = error;
+      onTransportError?.(error);
+    };
 
     this.client = client;
     this.transport = transport;
@@ -125,10 +132,26 @@ export class McpConnection {
   async call(name, args = {}, { timeoutMs = this.timeoutMs } = {}) {
     await this.connect();
 
-    const result = await this.client.callTool({ name, arguments: args }, undefined, {
-      timeout: timeoutMs,
-      maxTotalTimeout: timeoutMs,
-    });
+    let result;
+    try {
+      result = await this.client.callTool({ name, arguments: args }, undefined, {
+        timeout: timeoutMs,
+        maxTotalTimeout: timeoutMs,
+      });
+    } catch (error) {
+      this.lastError ??= error;
+      const details = [
+        this.lastError !== error ? this.lastError?.message : null,
+        this.stderr.trim() || null,
+      ].filter(Boolean);
+      if (details.length === 0) throw error;
+
+      throw new Error(
+        `${error.message}\n--- recent ${this.name} MCP server diagnostics ---\n` +
+          details.join('\n'),
+        { cause: error },
+      );
+    }
 
     const text = (result.content ?? [])
       .filter((c) => c.type === 'text')

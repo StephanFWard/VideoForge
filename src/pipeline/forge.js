@@ -3,7 +3,8 @@
  *
  *   topic | storyboard file
  *        -> planner            (script + per-scene prompts)
- *        -> VisualRenderer     (ComfyUI MCP: keyframe -> motion)
+ *        -> VisualRenderer     (ComfyUI / LTX), or video theme layers
+ *        -> local subject matte + ffmpeg composite (uploaded-video edits)
  *        -> KokoroNarration    (Kokoro MCP: narration per scene)
  *        -> assembleVideo      (ffmpeg: cut, join, deliver at 4K)
  *
@@ -15,10 +16,11 @@ import path from 'node:path';
 import { loadConfig } from '../config.js';
 import { createLogger } from '../util/log.js';
 import { ensureDir, runStamp, slugify, writeJson } from '../util/fs.js';
-import { ffmpegAvailable, placeholderStill } from '../util/ffmpeg.js';
-import { loadStoryboard } from './planner.js';
+import { ffmpegAvailable, placeholderStill, probe } from '../util/ffmpeg.js';
+import { loadStoryboard, planVideoEdit } from './planner.js';
 import { REFERENCE_SCOPES, VisualRenderer } from './visuals.js';
 import { resolveReferences, referenceSetId } from './references.js';
+import { renderVideoThemes } from './video-edit.js';
 import { KokoroNarration } from '../mcp/kokoro.js';
 import { narrateScenes } from './audio.js';
 import { assembleVideo } from './assemble.js';
@@ -40,6 +42,9 @@ import { buildTimeline } from './timeline.js';
  * @param {Array<object>} [req.references] uploaded images/videos for LTX-Video
  *                                        conditioning: [{path, strength, startFrame}]
  * @param {'first'|'all'} [req.referenceScope] scenes conditioned by run-wide references
+ * @param {boolean} [req.editVideo] use one uploaded video as an editable source clip
+ * @param {string} [req.backgroundTheme] generated replacement background theme
+ * @param {string} [req.foregroundTheme] generated replacement foreground theme
  */
 export async function forge({
   topic,
@@ -53,10 +58,15 @@ export async function forge({
   silent = false,
   references = [],
   referenceScope = 'first',
+  editVideo = false,
+  backgroundTheme = '',
+  foregroundTheme = '',
 } = {}) {
   const started = Date.now();
   const log = logger ?? createLogger({ silent, onEvent });
   const config = loadConfig(configOverrides);
+  const requestedBackgroundTheme = String(backgroundTheme ?? '').trim();
+  const requestedForegroundTheme = String(foregroundTheme ?? '').trim();
 
   if (!REFERENCE_SCOPES.includes(referenceScope)) {
     throw new Error(
@@ -84,6 +94,8 @@ export async function forge({
       transition: transition ?? config.transition,
     },
   });
+  const effectiveBackgroundTheme = requestedBackgroundTheme ||
+    (!requestedForegroundTheme ? String(topic || storyboard.topic).trim() : '');
 
   log.ok(`Storyboard ready from ${mode}: "${storyboard.title}" (${storyboard.scenes.length} scenes)`);
   for (const warning of warnings) log.warn(warning);
@@ -107,6 +119,64 @@ export async function forge({
       .join('; ');
     log.ok(`Reference media: ${resolvedReferences.references.length} item(s) - ${described}`);
     for (const warning of resolvedReferences.warnings) log.warn(warning);
+  }
+
+  let editSource = null;
+  let editSourceInfo = null;
+  if (editVideo) {
+    const videos = resolvedReferences.references.filter((reference) => reference.kind === 'video');
+    if (videos.length !== 1) {
+      throw new Error(
+        `Edit uploaded video requires exactly one video reference; found ${videos.length}.`,
+      );
+    }
+    editSource = videos[0];
+    if (!effectiveBackgroundTheme && !requestedForegroundTheme) {
+      throw new Error('A video edit needs a background or foreground theme.');
+    }
+    editSourceInfo = await probe(editSource.path, config.ffprobe);
+    if (!editSourceInfo?.hasVideo || !editSourceInfo.duration || !editSourceInfo.width || !editSourceInfo.height) {
+      throw new Error(`Could not read video metadata for edit source "${editSource.path}".`);
+    }
+    const editSeconds = editSourceInfo.duration;
+    const editPlan = planVideoEdit(topic || storyboard.topic, {
+      seconds: editSeconds,
+      defaults: {
+        voice: config.kokoro.voice,
+        speed: config.kokoro.speed,
+        lang: config.kokoro.lang,
+        transition: transition ?? config.transition,
+      },
+    });
+    storyboard.scenes = editPlan.storyboard.scenes;
+    storyboard.estimatedSeconds = editPlan.storyboard.estimatedSeconds;
+    storyboard.look = '';
+    storyboard.negative = editPlan.storyboard.negative;
+    resolvedReferences.references = resolvedReferences.references.filter(
+      (reference) => reference.path !== editSource.path,
+    );
+    if (resolvedReferences.references.length > 0) {
+      throw new Error(
+        'Layered video edits currently use the source video and theme prompts only. ' +
+          'Remove additional reference images from this edit request.',
+      );
+    }
+
+    config.render = { ...config.render };
+    config.intermediate = { ...config.intermediate };
+    config.delivery = { ...config.delivery };
+    if (editSourceInfo.height > editSourceInfo.width) {
+      for (const size of [config.render, config.intermediate, config.delivery]) {
+        [size.width, size.height] = [size.height, size.width];
+      }
+      storyboard.aspect = '9:16';
+    } else {
+      storyboard.aspect = '16:9';
+    }
+    log.ok(
+      `Video edit source: ${path.basename(editSource.path)} ` +
+        `(${editSourceInfo.width}x${editSourceInfo.height}, ${editSourceInfo.duration.toFixed(1)}s)`,
+    );
   }
 
   const allWarnings = [...warnings, ...referenceWarnings];
@@ -144,17 +214,34 @@ export async function forge({
     // expensive runs, so a bad upload fails in the planning stage.
     references: resolvedReferences.references,
     referenceScope,
+    inputVideoPath: editSource?.path ?? null,
+    inputVideoInfo: editSourceInfo,
   });
 
   const segmentResults = [];
   let narration = null;
+  let videoThemes = null;
 
   try {
     // ---- 3. Visuals + narration, scene by scene ---------------------------
-    const visual = await renderer.init();
+    const visual = editVideo
+      ? { backend: 'layered-composite', reason: 'Local segmentation and ffmpeg compositing' }
+      : await renderer.init();
 
     narration = new KokoroNarration(config, { logger: log });
     await narration.connect();
+
+    if (editVideo) {
+      videoThemes = await renderVideoThemes({
+        source: editSource.path,
+        sourceInfo: editSourceInfo,
+        backgroundTheme: effectiveBackgroundTheme,
+        foregroundTheme: requestedForegroundTheme,
+        outputDir: ensureDir(path.join(workDir, 'video-edit')),
+        config,
+        logger: log,
+      });
+    }
 
     for (const [index, scene] of storyboard.scenes.entries()) {
       const sceneNumber = index + 1;
@@ -170,14 +257,24 @@ export async function forge({
       log.step(`Scene ${sceneNumber}/${storyboard.scenes.length}: ${scene.title}`);
 
       // Visuals first, so scene length is then driven by the narration we make.
-      const visualResult = await visual.renderScene({
-        scene,
-        index: sceneNumber,
-        outDir: sceneDir,
-        width: config.render.width,
-        height: config.render.height,
-        fps: config.fps,
-      });
+      const visualResult = editVideo
+        ? {
+            clip: videoThemes.clip,
+            still: null,
+            method: 'segmented-theme-composite',
+            backend: 'comfy+rembg+ffmpeg',
+            motion: 'source-video',
+            seed: null,
+            cached: false,
+          }
+        : await visual.renderScene({
+            scene,
+            index: sceneNumber,
+            outDir: sceneDir,
+            width: config.render.width,
+            height: config.render.height,
+            fps: config.fps,
+          });
       log.info(`  visuals: ${visualResult.method}`);
 
       const [spoken] = await narrateScenes({
@@ -293,6 +390,18 @@ export async function forge({
             })),
           }
         : null,
+      videoEdit: editSource
+        ? {
+            source: editSource.path,
+            durationSeconds: editSourceInfo.duration,
+            width: editSourceInfo.width,
+            height: editSourceInfo.height,
+            method: 'automatic-foreground-matte-and-layer-composite',
+            backgroundTheme: effectiveBackgroundTheme || null,
+            foregroundTheme: requestedForegroundTheme || null,
+            assets: videoThemes?.assets ?? {},
+          }
+        : null,
       output: {
         video: assembled.finalPath,
         master: assembled.masterPath,
@@ -352,7 +461,7 @@ export async function forge({
     };
   } finally {
     await narration?.close();
-    await renderer.close();
+    if (!editVideo) await renderer.close();
   }
 }
 

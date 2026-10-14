@@ -59,6 +59,9 @@ LTX-VIDEO OPTIONS (local video diffusion)
       --reference-strength <n>  How strictly references are obeyed, 0..1 (default: 1)
       --reference-start <n>     Frame each reference appears at (default: 0)
       --reference-scope <s>     first | all (default: first)
+      --edit-video              Edit one uploaded video instead of making a montage
+      --background-theme <text> Replace the source background (defaults to the topic in edit mode)
+      --foreground-theme <text> Replace the source foreground inside its moving silhouette
 
 EXAMPLES
   video-forge forge "how to brew better coffee" --scenes 5
@@ -72,6 +75,8 @@ EXAMPLES
   video-forge forge "a lighthouse in a storm" --backend ltx
   video-forge forge "animate my product" --backend ltx --reference ./product.png
   video-forge forge "continue this clip" --backend ltx --reference ./shot.mp4 --reference-start 60
+  video-forge forge "A short beach narration" --edit-video --reference ./clip.mp4 \\
+    --background-theme "a tropical beach at sunset" --foreground-theme "a surfer in a wetsuit"
 `;
 
 /** Flags that may be repeated, collecting into an array. */
@@ -81,7 +86,7 @@ const REPEATABLE = new Set(['reference']);
 export function parseFlags(argv) {
   const flags = { _: [] };
   const aliases = { t: 'topic', s: 'storyboard', h: 'help', o: 'out' };
-  const booleans = new Set(['help', 'plan-only', 'json', 'silent', 'no-cache']);
+  const booleans = new Set(['help', 'plan-only', 'json', 'silent', 'no-cache', 'edit-video']);
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
@@ -218,6 +223,13 @@ async function cmdForge(flags) {
     referenceScope: flags['reference-scope'] && flags['reference-scope'] !== true
       ? String(flags['reference-scope'])
       : 'first',
+    editVideo: Boolean(flags['edit-video']),
+    backgroundTheme: flags['background-theme'] && flags['background-theme'] !== true
+      ? String(flags['background-theme'])
+      : '',
+    foregroundTheme: flags['foreground-theme'] && flags['foreground-theme'] !== true
+      ? String(flags['foreground-theme'])
+      : '',
   });
 
   if (flags['plan-only']) {

@@ -6,7 +6,13 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectIntent, fillTemplate, planFromTopic, titleFromTopic } from '../src/pipeline/planner.js';
+import {
+  detectIntent,
+  fillTemplate,
+  planFromTopic,
+  planVideoEdit,
+  titleFromTopic,
+} from '../src/pipeline/planner.js';
 import { normalizeStoryboard, storyboardStats, LIMITS } from '../src/pipeline/storyboard.js';
 
 test('detectIntent picks the fitness template for workout topics', () => {
@@ -48,6 +54,25 @@ test('planFromTopic yields a normalisable storyboard with a call to action', () 
 test('planFromTopic honours an explicit scene count', () => {
   const { storyboard } = normalizeStoryboard(planFromTopic('a workout routine', { scenes: 3 }), {});
   assert.equal(storyboard.scenes.length, 3);
+});
+
+test('planVideoEdit creates one source-preserving edit scene', () => {
+  const { storyboard } = planVideoEdit('Change the background to a golf course', {
+    seconds: 5.6,
+    defaults: { voice: 'af_heart' },
+  });
+
+  test('planVideoEdit keeps the exact duration for source clips longer than 20 seconds', () => {
+    const { storyboard } = planVideoEdit('Change the background to a beach', { seconds: 42.7 });
+    assert.equal(storyboard.scenes[0].seconds, 42.7);
+    assert.equal(storyboard.scenes[0].outputSeconds, 42.7);
+    assert.equal(storyboard.estimatedSeconds, 43);
+  });
+
+  assert.equal(storyboard.scenes.length, 1);
+  assert.equal(storyboard.scenes[0].outputSeconds, 5.6);
+  assert.match(storyboard.scenes[0].videoPrompt, /Change the background to a golf course/);
+  assert.match(storyboard.scenes[0].videoPrompt, /Preserve the original subject/);
 });
 
 test('planFromTopic refuses an empty topic', () => {
